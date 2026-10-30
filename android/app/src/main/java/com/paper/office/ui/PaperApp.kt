@@ -142,6 +142,7 @@ fun PaperApp(
     onSaveAs: (String) -> Unit,
     onPickFolder: () -> Unit,
     onExportPdf: (String) -> Unit,
+    onExportXlsx: (String) -> Unit,
     onRequestStorage: () -> Unit,
 ) {
     AnimatedContent(
@@ -165,7 +166,7 @@ fun PaperApp(
         } else {
             DocumentScreen(
                 vm = vm, ref = target, onOpen = onOpen, onSaveAs = onSaveAs,
-                onExportPdf = onExportPdf, onBack = { vm.close() },
+                onExportPdf = onExportPdf, onExportXlsx = onExportXlsx, onBack = { vm.close() },
             )
         }
     }
@@ -467,6 +468,7 @@ private fun DocumentScreen(
     onOpen: () -> Unit,
     onSaveAs: (String) -> Unit,
     onExportPdf: (String) -> Unit,
+    onExportXlsx: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
@@ -531,6 +533,12 @@ private fun DocumentScreen(
                                 Icon(Icons.Filled.FolderOpen, contentDescription = "다른 문서 열기")
                             }
                         }
+                        DocKind.XLSX -> {
+                            IconButton(
+                                onClick = { onExportXlsx(ref.name.removeSuffix(".xlsx") + "-편집.xlsx") },
+                                enabled = vm.sheetEdits.isNotEmpty(),
+                            ) { Icon(Icons.Filled.Save, contentDescription = "저장") }
+                        }
                         else -> {
                             IconButton(onClick = onOpen) {
                                 Icon(Icons.Filled.FolderOpen, contentDescription = "다른 문서 열기")
@@ -549,7 +557,7 @@ private fun DocumentScreen(
                 DocKind.PDF -> PdfEditorView(vm, ref)
                 DocKind.TEXT, DocKind.CSV, DocKind.MARKDOWN -> TextEditorView(vm, ref)
                 DocKind.DOCX -> DocxView(ref, vm.textScale)
-                DocKind.XLSX -> SheetView(ref)
+                DocKind.XLSX -> SheetView(vm, ref)
                 DocKind.PPTX -> PptxView(ref, vm.textScale)
                 DocKind.IMAGE -> ImageView(ref)
                 DocKind.HWP, DocKind.UNKNOWN -> UnsupportedView(ref)
@@ -928,11 +936,13 @@ private fun PptxView(ref: DocRef, textScale: Float) {
 //  XLSX (읽기, 표)
 // ---------------------------------------------------------------------------
 @Composable
-private fun SheetView(ref: DocRef) {
+private fun SheetView(vm: AppViewModel, ref: DocRef) {
     val context = LocalContext.current
     val sheet by produceState(initialValue = null as OfficeReaders.Sheet?, ref.uri) {
         value = withContext(Dispatchers.IO) { runCatching { OfficeReaders.readXlsxFirstSheet(context, ref.uri) }.getOrNull() }
     }
+    var editing by remember { mutableStateOf<Triple<Int, Int, String>?>(null) }
+
     when (val s = sheet) {
         null -> CenterMessage("시트를 읽는 중…", spinner = true)
         else -> {
@@ -941,18 +951,23 @@ private fun SheetView(ref: DocRef) {
             } else {
                 val hScroll = rememberScrollState()
                 LazyColumn(Modifier.fillMaxSize().padding(8.dp)) {
-                    items(s.rows) { row ->
+                    itemsIndexed(s.rows) { r, row ->
                         Row(Modifier.horizontalScroll(hScroll)) {
-                            row.forEach { cell ->
+                            row.forEachIndexed { c, cell ->
+                                val edited = vm.sheetEdits.containsKey(r to c)
+                                val value = vm.sheetEdits[r to c] ?: cell
                                 Text(
-                                    text = cell,
+                                    text = value,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.bodySmall,
+                                    color = if (edited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier
                                         .width(110.dp)
                                         .border(0.5.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f))
-                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        .background(if (edited) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent)
+                                        .clickable { editing = Triple(r, c, value) }
+                                        .padding(horizontal = 8.dp, vertical = 8.dp),
                                 )
                             }
                         }
@@ -961,6 +976,28 @@ private fun SheetView(ref: DocRef) {
             }
         }
     }
+
+    editing?.let { e ->
+        var text by remember(e) { mutableStateOf(e.third) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text("셀 편집 · ${colLabel(e.second)}${e.first + 1}") },
+            text = {
+                OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = false)
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.setSheetCell(e.first, e.second, text); editing = null }) { Text("확인") }
+            },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("취소") } },
+        )
+    }
+}
+
+private fun colLabel(index: Int): String {
+    var i = index + 1
+    val sb = StringBuilder()
+    while (i > 0) { val r = (i - 1) % 26; sb.insert(0, ('A' + r)); i = (i - 1) / 26 }
+    return sb.toString()
 }
 
 // ---------------------------------------------------------------------------

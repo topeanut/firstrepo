@@ -58,6 +58,11 @@ class MainActivity : ComponentActivity() {
             uri?.let { vm.exportPdfTo(it) }
         }
 
+    private val createXlsx =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+            uri?.let { vm.exportXlsxTo(it) }
+        }
+
     private val reqRead =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { vm.refreshStorage() }
 
@@ -73,6 +78,7 @@ class MainActivity : ComponentActivity() {
                     onSaveAs = { suggestedName -> createDoc.launch(suggestedName) },
                     onPickFolder = { openTree.launch(null) },
                     onExportPdf = { suggestedName -> createPdf.launch(suggestedName) },
+                    onExportXlsx = { suggestedName -> createXlsx.launch(suggestedName) },
                     onRequestStorage = { requestStorageAccess() },
                 )
             }
@@ -151,6 +157,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var textScale by mutableStateOf(1f)
     fun bumpTextScale(delta: Float) { textScale = (textScale + delta).coerceIn(0.7f, 2.4f) }
 
+    // XLSX 셀 편집: (행, 열) -> 새 값
+    val sheetEdits: androidx.compose.runtime.snapshots.SnapshotStateMap<Pair<Int, Int>, String> =
+        androidx.compose.runtime.mutableStateMapOf()
+
+    fun setSheetCell(row: Int, col: Int, value: String) {
+        sheetEdits[row to col] = value
+    }
+
+    fun exportXlsxTo(uri: Uri) {
+        val src = current?.uri ?: return
+        val edits = HashMap(sheetEdits)
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                com.paper.office.doc.XlsxWriter.save(getApplication(), src, uri, edits)
+            }
+            toastMessage = if (ok) "엑셀 저장 완료" else "저장 중 오류가 발생했어요"
+        }
+    }
+
     // 기기 전체 문서 접근
     var hasStorageAccess by mutableStateOf(false)
         private set
@@ -217,6 +242,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current = DocRef(entry.uri, entry.name, entry.kind)
         editorLoadedFor = null
         pdfEdit = null
+        sheetEdits.clear()
         addRecent(current!!)
     }
 
@@ -227,6 +253,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current = DocRef(uri, name, kind)
         editorLoadedFor = null
         pdfEdit = null
+        sheetEdits.clear()
         addRecent(current!!)
     }
 
@@ -234,11 +261,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current = ref
         editorLoadedFor = null
         pdfEdit = null
+        sheetEdits.clear()
     }
 
     fun close() {
         current = null
         pdfEdit = null
+        sheetEdits.clear()
     }
 
     fun exportPdfTo(uri: Uri) {
