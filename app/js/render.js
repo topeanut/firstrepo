@@ -2,13 +2,19 @@
 import { renderPage } from "./pdf.js";
 import { drawStrokes } from "./ink.js";
 
-export function drawPaper(ctx, bg, w, h, scale) {
-  ctx.fillStyle = "#fff";
+const PAPER = {
+  light: { paper: "#fff", lined: "#cfe0f1", grid: "#e3e8ee" },
+  dark: { paper: "#202124", lined: "#2f3b4a", grid: "#33363b" },
+};
+
+export function drawPaper(ctx, bg, w, h, scale, dark = false) {
+  const pal = dark ? PAPER.dark : PAPER.light;
+  ctx.fillStyle = pal.paper;
   ctx.fillRect(0, 0, w, h);
   const step = 32 * scale;
   ctx.lineWidth = Math.max(1, scale);
   if (bg.type === "lined") {
-    ctx.strokeStyle = "#cfe0f1";
+    ctx.strokeStyle = pal.lined;
     ctx.beginPath();
     for (let y = step * 3; y < h - step; y += step) {
       ctx.moveTo(0, y);
@@ -16,7 +22,7 @@ export function drawPaper(ctx, bg, w, h, scale) {
     }
     ctx.stroke();
   } else if (bg.type === "grid") {
-    ctx.strokeStyle = "#e3e8ee";
+    ctx.strokeStyle = pal.grid;
     ctx.beginPath();
     for (let y = step; y < h; y += step) {
       ctx.moveTo(0, y);
@@ -30,7 +36,8 @@ export function drawPaper(ctx, bg, w, h, scale) {
   }
 }
 
-export async function drawBackground(canvas, page) {
+// `dark` only affects generated paper; PDFs are darkened with a CSS filter on screen.
+export async function drawBackground(canvas, page, dark = false) {
   const ctx = canvas.getContext("2d");
   if (page.bg.type === "pdf") {
     try {
@@ -40,7 +47,7 @@ export async function drawBackground(canvas, page) {
       console.warn("PDF render failed", e);
     }
   }
-  drawPaper(ctx, page.bg, canvas.width, canvas.height, canvas.width / page.w);
+  drawPaper(ctx, page.bg, canvas.width, canvas.height, canvas.width / page.w, dark);
 }
 
 // Renders a whole page (background + ink) into a new canvas `width` pixels wide.

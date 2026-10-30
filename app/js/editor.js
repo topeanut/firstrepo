@@ -5,6 +5,7 @@ import { Recorder, Player, fmtTime } from "./audio.js";
 import { putDoc, putNote, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
 import { icon } from "./icons.js";
+import { isDark, darkPdf, darkInk, cycleTheme, toggleDarkPdf, getTheme, THEME_LABEL, onThemeChange } from "./theme.js";
 
 const COLORS = ["#1c1c1e", "#0a63d8", "#d93025", "#1e8e3e", "#f29900"];
 const HL_COLORS = ["#ffe03d", "#7ce38b", "#7cc6ff", "#ff8fc7"];
@@ -80,6 +81,8 @@ export class Editor {
       </header>
       <div class="menu hidden" role="menu">
         <button data-act="pencil"></button>
+        <button data-act="theme"></button>
+        <button data-act="dark-pdf"></button>
         <button data-act="add-lined">줄 페이지 추가</button>
         <button data-act="add-grid">모눈 페이지 추가</button>
         <button data-act="add-blank">무지 페이지 추가</button>
@@ -142,6 +145,11 @@ export class Editor {
 
     this._resize = () => this.layout();
     window.addEventListener("resize", this._resize);
+    this._offTheme = onThemeChange(() => {
+      this.renderToolbar();
+      this.pageViews.forEach((pv) => this.release(pv));
+      this.updateVisible();
+    });
     this._visibility = () => document.hidden && this.saveNow();
     document.addEventListener("visibilitychange", this._visibility);
   }
@@ -157,7 +165,7 @@ export class Editor {
       const hl = this.tool === "hl";
       const cur = hl ? this.hlColor : this.penColor;
       sw.innerHTML = (hl ? HL_COLORS : COLORS)
-        .map((c) => `<button class="swatch${c === cur ? " on" : ""}" data-color="${c}" style="--c:${c}" aria-label="색 ${c}"></button>`)
+        .map((c) => `<button class="swatch${c === cur ? " on" : ""}" data-color="${c}" style="--c:${!hl && isDark() ? darkInk(c) : c}" aria-label="색 ${c}"></button>`)
         .join("");
       const curSize = hl ? this.hlSize : this.penSize;
       sz.innerHTML = [0, 1, 2]
@@ -166,6 +174,8 @@ export class Editor {
     }
     $('[data-act="pencil"]').textContent = this.pencilOnly ? "✓ Apple Pencil로만 쓰기 (손가락은 스크롤)" : "Apple Pencil로만 쓰기 (꺼짐: 손가락으로도 필기)";
     this.scroller?.classList.toggle("finger-draw", !this.pencilOnly);
+    $('[data-act="theme"]').textContent = `테마: ${THEME_LABEL[getTheme()]}`;
+    $('[data-act="dark-pdf"]').textContent = (darkPdf() ? "✓ " : "") + "다크 모드에서 PDF도 어둡게";
   }
 
   setTool(t) {
@@ -210,6 +220,12 @@ export class Editor {
       case "add-blank":
         menu.classList.add("hidden");
         this.addPage(act.slice(4));
+        break;
+      case "theme":
+        cycleTheme();
+        break;
+      case "dark-pdf":
+        toggleDarkPdf();
         break;
       case "zoom-in":
         this.setZoom(this.zoom * 1.25);
@@ -331,8 +347,11 @@ export class Editor {
       c.width = Math.round(pv.cssW * pr);
       c.height = Math.round(pv.cssH * pr);
     }
+    const isPdf = pv.page.bg.type === "pdf";
+    pv.bg.classList.toggle("inverted", isPdf && isDark() && darkPdf());
+    pv.el.classList.toggle("dark", this.pageDark(pv));
     this.redrawInk(pv);
-    await drawBackground(pv.bg, pv.page);
+    await drawBackground(pv.bg, pv.page, isDark());
   }
 
   fadedFn() {
@@ -342,11 +361,16 @@ export class Editor {
     return (s) => s.audio && s.audio.rec === rec.id && s.audio.t > t;
   }
 
+  // Dark paper: generated pages in dark mode, PDFs only when "PDF도 어둡게" is on.
+  pageDark(pv) {
+    return isDark() && (pv.page.bg.type !== "pdf" || darkPdf());
+  }
+
   redrawInk(pv) {
     if (!pv.rendered) return;
     const ctx = pv.ink.getContext("2d");
     ctx.clearRect(0, 0, pv.ink.width, pv.ink.height);
-    drawStrokes(ctx, this.byPage.get(pv.page.id) || [], pv.ink.width / pv.page.w, this.fadedFn());
+    drawStrokes(ctx, this.byPage.get(pv.page.id) || [], pv.ink.width / pv.page.w, this.fadedFn(), this.pageDark(pv) ? darkInk : null);
   }
 
   redrawVisible() {
@@ -544,7 +568,7 @@ export class Editor {
       if (!a?.stroke) return;
       const ctx = this.live.getContext("2d");
       ctx.clearRect(0, 0, this.live.width, this.live.height);
-      drawStroke(ctx, a.stroke, this.live.width / a.pv.page.w);
+      drawStroke(ctx, a.stroke, this.live.width / a.pv.page.w, false, this.pageDark(a.pv) ? darkInk : null);
     });
   }
 
@@ -727,6 +751,7 @@ export class Editor {
     window.removeEventListener("keydown", this._key);
     document.removeEventListener("pointerdown", this._menuCloser);
     document.removeEventListener("visibilitychange", this._visibility);
+    this._offTheme();
     this.pageViews.forEach((pv) => this.release(pv));
   }
 }

@@ -25,14 +25,15 @@ export function bbox(s) {
 
 const penWidth = (s, p) => s.width * (0.35 + 0.9 * p);
 
-export function drawStroke(ctx, s, scale, faded = false) {
+// `color` maps the stored colour to the displayed one (e.g. for dark paper).
+export function drawStroke(ctx, s, scale, faded = false, color = null) {
   const pts = s.pts;
   const n = pts.length / 3;
   if (!n) return;
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = ctx.fillStyle = faded ? "#9aa3ad" : s.color;
+  ctx.strokeStyle = ctx.fillStyle = faded ? "#9aa3ad" : color ? color(s.color) : s.color;
   if (s.tool === "hl") {
     ctx.globalAlpha = faded ? 0.15 : HL_ALPHA;
     ctx.lineWidth = s.width * scale;
@@ -69,9 +70,9 @@ export function drawStroke(ctx, s, scale, faded = false) {
 }
 
 // Highlighters render under pen ink, like on paper.
-export function drawStrokes(ctx, strokes, scale, isFaded = () => false) {
-  for (const s of strokes) if (s.tool === "hl") drawStroke(ctx, s, scale, isFaded(s));
-  for (const s of strokes) if (s.tool !== "hl") drawStroke(ctx, s, scale, isFaded(s));
+export function drawStrokes(ctx, strokes, scale, isFaded = () => false, color = null) {
+  for (const s of strokes) if (s.tool === "hl") drawStroke(ctx, s, scale, isFaded(s), color);
+  for (const s of strokes) if (s.tool !== "hl") drawStroke(ctx, s, scale, isFaded(s), color);
 }
 
 function segDist2(px, py, ax, ay, bx, by) {

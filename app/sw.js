@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever app files change.
-const VERSION = "penote-v1";
+const VERSION = "penote-v2";
 const ASSETS = [
   "./",
   "index.html",
@@ -16,6 +16,7 @@ const ASSETS = [
   "js/pdf.js",
   "js/plist.js",
   "js/render.js",
+  "js/theme.js",
   "vendor/pdf.min.mjs",
   "vendor/pdf.worker.min.mjs",
   "vendor/fflate.mjs",
