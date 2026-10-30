@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
@@ -53,6 +54,10 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.TextDecrease
+import androidx.compose.material.icons.filled.TextIncrease
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -493,6 +498,12 @@ private fun DocumentScreen(
                             }) { Icon(Icons.Filled.Save, contentDescription = "저장") }
                         }
                         DocKind.TEXT, DocKind.CSV, DocKind.MARKDOWN -> {
+                            IconButton(onClick = { vm.bumpTextScale(-0.1f) }) {
+                                Icon(Icons.Filled.TextDecrease, contentDescription = "글자 작게")
+                            }
+                            IconButton(onClick = { vm.bumpTextScale(0.1f) }) {
+                                Icon(Icons.Filled.TextIncrease, contentDescription = "글자 크게")
+                            }
                             IconButton(onClick = {
                                 val ok = vm.saveCurrentText()
                                 scope.launch { snackbar.showSnackbar(if (ok) "저장되었습니다" else "저장 실패 — '다른 이름으로'를 사용하세요") }
@@ -507,6 +518,17 @@ private fun DocumentScreen(
                                 DropdownMenuItem(text = { Text("다른 문서 열기") }, onClick = {
                                     menuOpen = false; onOpen()
                                 })
+                            }
+                        }
+                        DocKind.DOCX, DocKind.PPTX -> {
+                            IconButton(onClick = { vm.bumpTextScale(-0.1f) }) {
+                                Icon(Icons.Filled.TextDecrease, contentDescription = "글자 작게")
+                            }
+                            IconButton(onClick = { vm.bumpTextScale(0.1f) }) {
+                                Icon(Icons.Filled.TextIncrease, contentDescription = "글자 크게")
+                            }
+                            IconButton(onClick = onOpen) {
+                                Icon(Icons.Filled.FolderOpen, contentDescription = "다른 문서 열기")
                             }
                         }
                         else -> {
@@ -526,9 +548,9 @@ private fun DocumentScreen(
             when (ref.kind) {
                 DocKind.PDF -> PdfEditorView(vm, ref)
                 DocKind.TEXT, DocKind.CSV, DocKind.MARKDOWN -> TextEditorView(vm, ref)
-                DocKind.DOCX -> DocxView(ref)
+                DocKind.DOCX -> DocxView(ref, vm.textScale)
                 DocKind.XLSX -> SheetView(ref)
-                DocKind.PPTX -> PptxView(ref)
+                DocKind.PPTX -> PptxView(ref, vm.textScale)
                 DocKind.IMAGE -> ImageView(ref)
                 DocKind.HWP, DocKind.UNKNOWN -> UnsupportedView(ref)
             }
@@ -564,8 +586,19 @@ private fun PdfEditorView(vm: AppViewModel, ref: DocRef) {
             contentPadding = PaddingValues(start = 18.dp, top = 12.dp, end = 10.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(visiblePages, key = { it.src }) { pe ->
-                PdfEditablePage(repo, pe, model, renderWidth, canDelete = model.activeCount > 1, modifier = Modifier.animateItem())
+            itemsIndexed(visiblePages, key = { _, it -> it.src }) { index, pe ->
+                PdfEditablePage(
+                    repo = repo,
+                    pe = pe,
+                    model = model,
+                    renderWidth = renderWidth,
+                    pageNumber = index + 1,
+                    pageTotal = visiblePages.size,
+                    canDelete = model.activeCount > 1,
+                    canMoveUp = index > 0,
+                    canMoveDown = index < visiblePages.size - 1,
+                    modifier = Modifier.animateItem(),
+                )
             }
         }
         LazyLeftScrollbar(listState)
@@ -578,7 +611,11 @@ private fun PdfEditablePage(
     pe: PdfPageEdit,
     model: PdfEditModel,
     renderWidth: Int,
+    pageNumber: Int,
+    pageTotal: Int,
     canDelete: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val aspect = remember(pe.src) { runCatching { repo.aspectRatio(pe.src) }.getOrDefault(1.4f) }
@@ -623,12 +660,32 @@ private fun PdfEditablePage(
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
         }
+        // 순서 이동 (왼쪽 위)
+        Row(
+            Modifier.align(Alignment.TopStart).padding(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (canMoveUp) PageActionButton(Icons.Filled.KeyboardArrowUp, "위로") { model.moveUp(pe) }
+            if (canMoveDown) PageActionButton(Icons.Filled.KeyboardArrowDown, "아래로") { model.moveDown(pe) }
+        }
+        // 회전 / 삭제 (오른쪽 위)
         Row(
             Modifier.align(Alignment.TopEnd).padding(6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             PageActionButton(Icons.Filled.RotateRight, "회전") { model.rotatePage(pe) }
             if (canDelete) PageActionButton(Icons.Filled.Delete, "페이지 삭제") { model.deletePage(pe) }
+        }
+        // 페이지 번호 (아래 중앙)
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 6.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+        ) {
+            Text("$pageNumber / $pageTotal", color = Color.White, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -798,6 +855,7 @@ private fun TextEditorView(vm: AppViewModel, ref: DocRef) {
         modifier = Modifier.fillMaxSize().padding(8.dp),
         textStyle = MaterialTheme.typography.bodyMedium.copy(
             fontFamily = if (ref.kind == DocKind.CSV) FontFamily.Monospace else FontFamily.Default,
+            fontSize = MaterialTheme.typography.bodyMedium.fontSize * vm.textScale,
         ),
     )
 }
@@ -806,7 +864,7 @@ private fun TextEditorView(vm: AppViewModel, ref: DocRef) {
 //  DOCX (읽기)
 // ---------------------------------------------------------------------------
 @Composable
-private fun DocxView(ref: DocRef) {
+private fun DocxView(ref: DocRef, textScale: Float) {
     val context = LocalContext.current
     val text by produceState(initialValue = null as String?, ref.uri) {
         value = withContext(Dispatchers.IO) { runCatching { OfficeReaders.readDocxText(context, ref.uri) }.getOrNull() }
@@ -823,7 +881,9 @@ private fun DocxView(ref: DocRef) {
                             .fillMaxSize()
                             .verticalScroll(scroll)
                             .padding(start = 24.dp, top = 20.dp, end = 16.dp, bottom = 20.dp),
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize * textScale,
+                        ),
                     )
                 }
                 ScrollLeftScrollbar(scroll)
@@ -836,7 +896,7 @@ private fun DocxView(ref: DocRef) {
 //  PPTX (읽기, 슬라이드 텍스트)
 // ---------------------------------------------------------------------------
 @Composable
-private fun PptxView(ref: DocRef) {
+private fun PptxView(ref: DocRef, textScale: Float) {
     val context = LocalContext.current
     val text by produceState(initialValue = null as String?, ref.uri) {
         value = withContext(Dispatchers.IO) { runCatching { OfficeReaders.readPptxText(context, ref.uri) }.getOrNull() }
@@ -853,7 +913,9 @@ private fun PptxView(ref: DocRef) {
                             .fillMaxSize()
                             .verticalScroll(scroll)
                             .padding(start = 24.dp, top = 20.dp, end = 16.dp, bottom = 20.dp),
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize * textScale,
+                        ),
                     )
                 }
                 ScrollLeftScrollbar(scroll)

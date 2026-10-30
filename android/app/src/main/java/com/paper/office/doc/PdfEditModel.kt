@@ -46,6 +46,16 @@ class PdfEditModel(pageCount: Int) {
         dirty = true
     }
 
+    fun moveUp(p: PdfPageEdit) {
+        val i = pages.indexOf(p)
+        if (i > 0) { pages.removeAt(i); pages.add(i - 1, p); dirty = true }
+    }
+
+    fun moveDown(p: PdfPageEdit) {
+        val i = pages.indexOf(p)
+        if (i in 0 until pages.size - 1) { pages.removeAt(i); pages.add(i + 1, p); dirty = true }
+    }
+
     fun undo() {
         val p = lastEdited ?: pages.firstOrNull { !it.deleted } ?: return
         if (p.strokes.isNotEmpty()) { p.strokes.removeAt(p.strokes.size - 1); dirty = true }

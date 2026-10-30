@@ -146,6 +146,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var pdfEdit by mutableStateOf<PdfEditModel?>(null)
     var toastMessage by mutableStateOf<String?>(null)
 
+    // 읽기 글자 크기 배율(텍스트/워드/PPT 뷰어)
+    var textScale by mutableStateOf(1f)
+    fun bumpTextScale(delta: Float) { textScale = (textScale + delta).coerceIn(0.7f, 2.4f) }
+
     // 기기 전체 문서 접근
     var hasStorageAccess by mutableStateOf(false)
         private set
