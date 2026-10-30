@@ -14,13 +14,28 @@ export class Recorder {
     this.rec = null;
     this.id = null;
     this.startedAt = 0;
+    this.pausedAt = 0;
   }
   get active() {
     return !!this.rec;
   }
-  // Seconds since the current recording started.
+  get paused() {
+    return !!this.pausedAt;
+  }
+  // Seconds of audio recorded so far (paused time excluded).
   now() {
-    return (performance.now() - this.startedAt) / 1000;
+    return ((this.pausedAt || performance.now()) - this.startedAt) / 1000;
+  }
+  pause() {
+    if (!this.rec || this.pausedAt) return;
+    this.rec.pause();
+    this.pausedAt = performance.now();
+  }
+  resume() {
+    if (!this.rec || !this.pausedAt) return;
+    this.rec.resume();
+    this.startedAt += performance.now() - this.pausedAt;
+    this.pausedAt = 0;
   }
   async start(id) {
     const mime = pickMime();
@@ -33,6 +48,7 @@ export class Recorder {
     this.rec.start(1000);
     this.id = id;
     this.startedAt = performance.now();
+    this.pausedAt = 0;
   }
   // Stops and stores the audio; resolves to a recording entry for the doc.
   stop() {
@@ -48,6 +64,7 @@ export class Recorder {
         const entry = { id: this.id, blob: key, duration, name: "녹음 " + this.id, created: Date.now() };
         this.rec = null;
         this.id = null;
+        this.pausedAt = 0;
         resolve(entry);
       };
       rec.stop();

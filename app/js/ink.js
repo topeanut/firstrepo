@@ -95,3 +95,40 @@ export function hitStroke(s, x, y, r) {
   }
   return false;
 }
+
+// Partial eraser: cuts the parts of a stroke within `r` of (x, y).
+// Returns null when the stroke is untouched, otherwise the remaining pieces as pts arrays.
+export function cutStroke(s, x, y, r) {
+  const [x0, y0, x1, y1] = bbox(s);
+  if (x < x0 - r || x > x1 + r || y < y0 - r || y > y1 + r) return null;
+  const pts = s.pts;
+  const rr = (r + (s.tool === "hl" ? s.width / 2 : s.width * 0.4)) ** 2;
+  // Densify long segments so the cut lands close to the eraser edge.
+  const step = Math.max(0.5, r / 3);
+  const dense = [];
+  for (let i = 0; i < pts.length; i += 3) {
+    if (i) {
+      const ax = pts[i - 3], ay = pts[i - 2], ap = pts[i - 1];
+      const len = Math.hypot(pts[i] - ax, pts[i + 1] - ay);
+      for (let k = 1; k * step < len; k++) {
+        const t = (k * step) / len;
+        dense.push(ax + (pts[i] - ax) * t, ay + (pts[i + 1] - ay) * t, ap + (pts[i + 2] - ap) * t);
+      }
+    }
+    dense.push(pts[i], pts[i + 1], pts[i + 2]);
+  }
+  const pieces = [];
+  let cur = [];
+  let cut = false;
+  for (let i = 0; i < dense.length; i += 3) {
+    if ((dense[i] - x) ** 2 + (dense[i + 1] - y) ** 2 <= rr) {
+      cut = true;
+      if (cur.length) pieces.push(cur);
+      cur = [];
+    } else cur.push(Math.round(dense[i] * 100) / 100, Math.round(dense[i + 1] * 100) / 100, Math.round(dense[i + 2] * 100) / 100);
+  }
+  if (cur.length) pieces.push(cur);
+  if (!cut) return null;
+  // Drop crumbs left at the eraser edge.
+  return pieces.filter((p) => p.length >= 6 || pts.length === 3);
+}

@@ -7,7 +7,8 @@ import { icon } from "./icons.js";
 import { cycleTheme, getTheme, THEME_LABEL } from "./theme.js";
 
 const root = document.getElementById("app");
-let editor = null;
+// Open editors, one per pane (two in split view).
+const panes = [];
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmtDate = (t) =>
@@ -16,8 +17,8 @@ const fmtDate = (t) =>
 const themeIcon = () => ({ system: "auto", light: "sun", dark: "moon" })[getTheme()];
 
 async function showLibrary() {
-  editor = null;
-  root.className = "library";
+  panes.length = 0;
+  root.className = "library screen-in";
   const notes = await listNotes();
   root.innerHTML = `
     <header class="lib-head">
@@ -34,8 +35,8 @@ async function showLibrary() {
         notes.length
           ? notes
               .map(
-                (n) => `
-        <article class="card" data-id="${n.id}">
+                (n, i) => `
+        <article class="card" data-id="${n.id}" style="--i:${Math.min(i, 20)}">
           <button class="thumb" data-act="open">${n.thumb ? `<img src="${n.thumb}" alt="" />` : ""}</button>
           <div class="card-meta">
             <div class="card-title">${esc(n.title)}</div>
@@ -67,7 +68,7 @@ function toast(msg, ms = 3000) {
 }
 
 async function onLibraryClick(e) {
-  if (root.className !== "library") return;
+  if (!root.classList.contains("library")) return;
   const b = e.target.closest("button");
   if (!b) return;
   const id = b.closest(".card")?.dataset.id;
@@ -133,13 +134,140 @@ async function importFiles(files) {
 async function openNote(id) {
   const doc = await getDoc(id);
   if (!doc) return showLibrary();
-  root.className = "editor";
-  root.innerHTML = "";
+  root.className = "editor screen-in";
+  root.innerHTML = `<div class="panes"></div>`;
+  panes.length = 0;
+  addPane(doc);
+}
+
+function addPane(doc, animate = false) {
+  const panesEl = root.querySelector(".panes");
+  const el = document.createElement("div");
+  el.className = "pane" + (animate ? " opening" : "");
   const host = document.createElement("div");
   host.className = "editor-host";
-  root.append(host);
-  editor = new Editor(host, doc, { onExit: () => showLibrary() });
-  window.__editor = editor;
+  el.append(host);
+  if (panes.length) {
+    const divider = document.createElement("div");
+    divider.className = "divider";
+    divider.title = "끌어서 크기 조절 · 두 번 탭하면 반반 · 끝까지 밀면 닫기";
+    panesEl.append(divider);
+    bindDivider(divider);
+  }
+  panesEl.append(el);
+  const pane = { el, host, editor: null };
+  panes.push(pane);
+  pane.editor = new Editor(host, doc, {
+    onExit: () => closePane(pane),
+    onSplit: (ed) => toggleSplit(ed),
+    isSplit: () => panes.length > 1,
+  });
+  window.__editor = pane.editor;
+  window.__panes = panes;
+  panes.forEach((p) => p.editor.renderToolbar());
+  return pane;
+}
+
+// Removes a pane whose editor has already saved and closed.
+async function closePane(pane) {
+  if (panes.length <= 1) return showLibrary();
+  pane.el.classList.add("closing");
+  await new Promise((r) => setTimeout(r, 200));
+  root.querySelector(".divider")?.remove();
+  pane.el.remove();
+  panes.splice(panes.indexOf(pane), 1);
+  panes[0].el.style.flex = "";
+  window.__editor = panes[0].editor;
+  panes[0].editor.renderToolbar();
+}
+
+async function toggleSplit(fromEditor) {
+  if (panes.length > 1) {
+    const other = panes.find((p) => p.editor !== fromEditor);
+    await other.editor.close();
+    return closePane(other);
+  }
+  const id = await pickNote(panes.map((p) => p.editor.doc.id));
+  if (!id) return;
+  let doc;
+  if (id === "__new") {
+    doc = newDoc();
+    doc.pages.push(newPage("lined"));
+    await putDoc(doc);
+    await putNote(noteMeta(doc, null));
+  } else doc = await getDoc(id);
+  if (doc) addPane(doc, true);
+}
+
+// Modal note picker for the second pane; resolves to a note id, "__new", or null.
+async function pickNote(excludeIds) {
+  const notes = (await listNotes()).filter((n) => !excludeIds.includes(n.id));
+  return new Promise((resolve) => {
+    const back = document.createElement("div");
+    back.className = "picker-backdrop";
+    back.innerHTML = `
+      <div class="picker" role="dialog" aria-label="같이 볼 노트 선택">
+        <h2>화면 분할</h2>
+        <p>오른쪽에 같이 띄울 노트를 고르세요.</p>
+        <div class="picker-grid">
+          <button data-id="__new"><span class="thumb new-thumb">${icon("plus")}</span><span>새 노트</span></button>
+          ${notes
+            .map((n) => `<button data-id="${n.id}"><span class="thumb">${n.thumb ? `<img src="${n.thumb}" alt="" />` : ""}</span><span>${esc(n.title)}</span></button>`)
+            .join("")}
+        </div>
+      </div>`;
+    const done = (v) => {
+      back.remove();
+      resolve(v);
+    };
+    back.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-id]");
+      if (b) done(b.dataset.id);
+      else if (e.target === back) done(null);
+    });
+    document.body.append(back);
+  });
+}
+
+// Divider: drag to resize, double tap for 50/50, drag past the edge to close that side.
+function bindDivider(divider) {
+  let lastTap = 0;
+  divider.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastTap < 320) {
+      panes[0].el.style.flex = "";
+      lastTap = 0;
+      return;
+    }
+    lastTap = now;
+    divider.setPointerCapture(e.pointerId);
+    divider.classList.add("dragging");
+    const box = root.querySelector(".panes").getBoundingClientRect();
+    let ratio = 0.5;
+    const move = (ev) => {
+      ratio = (ev.clientX - box.left) / box.width;
+      const shown = Math.min(0.88, Math.max(0.12, ratio));
+      panes[0].el.style.flex = `0 0 ${shown * 100}%`;
+      panes[0].el.style.opacity = ratio < 0.15 ? 0.5 : "";
+      panes[1].el.style.opacity = ratio > 0.85 ? 0.5 : "";
+    };
+    const up = async () => {
+      divider.removeEventListener("pointermove", move);
+      divider.removeEventListener("pointerup", up);
+      divider.removeEventListener("pointercancel", up);
+      divider.classList.remove("dragging");
+      panes.forEach((p) => (p.el.style.opacity = ""));
+      const victim = ratio < 0.15 ? panes[0] : ratio > 0.85 ? panes[1] : null;
+      if (victim) {
+        await victim.editor.close();
+        closePane(victim);
+      }
+    };
+    divider.addEventListener("pointermove", move);
+    divider.addEventListener("pointerup", up);
+    divider.addEventListener("pointercancel", up);
+  });
 }
 
 root.addEventListener("click", onLibraryClick);

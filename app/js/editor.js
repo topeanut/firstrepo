@@ -1,6 +1,6 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { drawStroke, drawStrokes, hitStroke, bbox } from "./ink.js";
-import { drawBackground, exportPdf, makeThumb } from "./render.js";
+import { drawStroke, drawStrokes, hitStroke, bbox, cutStroke } from "./ink.js";
+import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
 import { getBlob, putDoc, putNote, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
@@ -8,12 +8,13 @@ import { icon } from "./icons.js";
 import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem } from "./items.js";
 import { isDark, darkPdf, darkInk, cycleTheme, toggleDarkPdf, getTheme, THEME_LABEL, onThemeChange } from "./theme.js";
 
-const COLORS = ["#1c1c1e", "#0a63d8", "#d93025", "#1e8e3e", "#f29900"];
+const COLORS = ["#000000", "#5f6368", "#0a63d8", "#d93025", "#1e8e3e", "#f29900", "#8e44ad"];
+const COLOR_NAMES = { "#000000": "검정", "#5f6368": "회색", "#0a63d8": "파랑", "#d93025": "빨강", "#1e8e3e": "초록", "#f29900": "주황", "#8e44ad": "보라" };
 const HL_COLORS = ["#ffe03d", "#7ce38b", "#7cc6ff", "#ff8fc7"];
 const PEN_SIZES = [1.6, 2.6, 4.2];
 const HL_SIZES = [12, 20, 30];
 const MAX_CANVAS_PX = 3.5e6; // per canvas; iPad Safari has a tight total canvas memory budget
-const ERASER_R = 10;
+const ERASER_SIZES = [5, 11, 22];
 
 const prefs = {
   get(k, d) {
@@ -32,15 +33,22 @@ const prefs = {
 };
 
 export class Editor {
-  constructor(root, doc, { onExit }) {
+  // opts: { onExit, onSplit, isSplit } — onSplit opens/closes the second pane (app.js).
+  constructor(root, doc, { onExit, onSplit = null, isSplit = () => false }) {
     this.root = root;
     this.doc = doc;
     this.onExit = onExit;
+    this.onSplit = onSplit;
+    this.isSplit = isSplit;
+    Editor.focused = this;
     this.tool = prefs.get("tool", "pen");
     this.penColor = prefs.get("penColor", COLORS[0]);
     this.hlColor = prefs.get("hlColor", HL_COLORS[0]);
     this.penSize = prefs.get("penSize", 1);
     this.hlSize = prefs.get("hlSize", 1);
+    this.eraserMode = prefs.get("eraserMode", "partial");
+    this.eraserSize = prefs.get("eraserSize", 1);
+    this.sidebarOpen = prefs.get("sidebar", window.innerWidth >= 700);
     this.pencilOnly = prefs.get("pencilOnly", true);
     this.zoom = 1;
     this.undoStack = [];
@@ -53,8 +61,13 @@ export class Editor {
     this.recorder = new Recorder();
     this.player = new Player();
     this.replay = true;
+    this.thumbs = new Map(); // page id -> { url, stale }
+    if (doc.view?.zoom) this.zoom = doc.view.zoom;
     this.build();
+    this.root.querySelector(".body").classList.toggle("sidebar-open", this.sidebarOpen);
     this.layout();
+    this.buildSidebar();
+    this.restoreView();
     this.bindInput();
     this.saveTimer = null;
   }
@@ -65,6 +78,7 @@ export class Editor {
       <header class="toolbar">
         <div class="tb-group">
           <button class="icon-btn" data-act="back" title="라이브러리">${icon("back")}</button>
+          <button class="icon-btn" data-act="sidebar" title="페이지 미리보기">${icon("pages")}</button>
           <input class="title-input" value="" aria-label="노트 제목" />
         </div>
         <div class="tb-group tools">
@@ -80,13 +94,15 @@ export class Editor {
           <button class="icon-btn" data-act="add" title="추가 (사진, PDF, 파일, 페이지)">${icon("plus")}</button>
           <button class="icon-btn" data-act="undo" title="실행 취소">${icon("undo")}</button>
           <button class="icon-btn" data-act="redo" title="다시 실행">${icon("redo")}</button>
-          <button class="icon-btn" data-act="record" title="녹음">${icon("mic")}<span class="rec-time"></span></button>
+          <button class="icon-btn" data-act="record" title="녹음 시작">${icon("mic")}</button>
           <button class="icon-btn" data-act="player" title="녹음 듣기">${icon("play")}</button>
+          <button class="icon-btn" data-act="split" title="화면 분할">${icon("split")}</button>
           <button class="icon-btn" data-act="more" title="더보기">${icon("more")}</button>
         </div>
       </header>
       <div class="menu hidden" role="menu">
         <button data-act="pencil"></button>
+        <button data-act="split-menu"></button>
         <button data-act="theme"></button>
         <button data-act="dark-pdf"></button>
         <button data-act="zoom-in">확대</button>
@@ -105,7 +121,14 @@ export class Editor {
       <input type="file" class="pick pick-image" accept="image/*" multiple hidden />
       <input type="file" class="pick pick-pdf" accept="application/pdf,.pdf" multiple hidden />
       <input type="file" class="pick pick-file" multiple hidden />
-      <div class="scroller"><div class="pages"></div></div>
+      <div class="recbar hidden">
+        <span class="rec-dot"></span>
+        <span class="rec-label">녹음 중</span>
+        <span class="rec-clock">0:00</span>
+        <span class="grow"></span>
+        <button class="pill" data-act="rec-pause">${icon("pause")}<span>일시정지</span></button>
+        <button class="pill stop" data-act="rec-stop">${icon("stop")}<span>정지</span></button>
+      </div>
       <div class="playerbar hidden">
         <select class="rec-select" aria-label="녹음 선택"></select>
         <button class="icon-btn" data-act="toggle-play">${icon("play")}</button>
@@ -115,6 +138,11 @@ export class Editor {
         <button class="chip" data-act="speed">1x</button>
         <button class="chip on" data-act="replay" title="재생 위치 이후 필기를 흐리게 표시">리플레이</button>
         <button class="icon-btn" data-act="close-player" title="닫기">${icon("close")}</button>
+      </div>
+      <div class="body">
+        <nav class="sidebar" aria-label="페이지 미리보기"></nav>
+        <div class="scroller"><div class="pages"></div></div>
+        <button class="page-indicator" data-act="sidebar" title="페이지 미리보기"></button>
       </div>
       <div class="toast hidden"></div>`;
     const $ = (s) => this.root.querySelector(s);
@@ -167,14 +195,26 @@ export class Editor {
     });
     $(".rec-select").addEventListener("change", (e) => this.openPlayer(Number(e.target.value)));
 
-    this._resize = () => this.layout();
-    window.addEventListener("resize", this._resize);
+    let lastW = 0;
+    this._ro = new ResizeObserver(() => {
+      const w = this.scroller.clientWidth;
+      if (!w || Math.abs(w - lastW) < 2) return;
+      lastW = w;
+      clearTimeout(this._roT);
+      this._roT = setTimeout(() => this.relayout(), 90);
+    });
+    this._ro.observe(this.scroller);
+    this.root.addEventListener("pointerdown", () => (Editor.focused = this), true);
     this._offTheme = onThemeChange(() => {
       this.renderToolbar();
       this.pageViews.forEach((pv) => this.release(pv));
       this.updateVisible();
     });
-    this._visibility = () => document.hidden && this.saveNow();
+    this._visibility = () => {
+      if (!document.hidden) return;
+      this.doc.view = this.currentView();
+      this.saveNow();
+    };
     document.addEventListener("visibilitychange", this._visibility);
   }
 
@@ -185,13 +225,20 @@ export class Editor {
     const sz = $(".sizes");
     this.scroller?.classList.toggle("select-mode", this.tool === "select");
     if (this.tool !== "select") this.select(null);
-    if (this.tool === "eraser" || this.tool === "select") {
+    if (this.tool === "select") {
       sw.innerHTML = sz.innerHTML = "";
+    } else if (this.tool === "eraser") {
+      sw.innerHTML = [["partial", "부분 지우개"], ["stroke", "획 지우개"]]
+        .map(([m, label]) => `<button class="chip${m === this.eraserMode ? " on" : ""}" data-act="eraser-mode" data-mode="${m}">${label}</button>`)
+        .join("");
+      sz.innerHTML = [0, 1, 2]
+        .map((i) => `<button class="size${i === this.eraserSize ? " on" : ""}" data-act="eraser-size" data-n="${i}" aria-label="지우개 크기 ${i + 1}"><i style="--s:${5 + i * 6}px"></i></button>`)
+        .join("");
     } else {
       const hl = this.tool === "hl";
       const cur = hl ? this.hlColor : this.penColor;
       sw.innerHTML = (hl ? HL_COLORS : COLORS)
-        .map((c) => `<button class="swatch${c === cur ? " on" : ""}" data-color="${c}" style="--c:${!hl && isDark() ? darkInk(c) : c}" aria-label="색 ${c}"></button>`)
+        .map((c) => `<button class="swatch${c === cur ? " on" : ""}" data-color="${c}" style="--c:${c}" title="${COLOR_NAMES[c] || c}" aria-label="${COLOR_NAMES[c] || c}"></button>`)
         .join("");
       const curSize = hl ? this.hlSize : this.penSize;
       sz.innerHTML = [0, 1, 2]
@@ -201,6 +248,8 @@ export class Editor {
     $('[data-act="pencil"]').textContent = this.pencilOnly ? "✓ Apple Pencil로만 쓰기 (손가락은 스크롤)" : "Apple Pencil로만 쓰기 (꺼짐: 손가락으로도 필기)";
     this.scroller?.classList.toggle("finger-draw", !this.pencilOnly);
     $('[data-act="theme"]').textContent = `테마: ${THEME_LABEL[getTheme()]}`;
+    $('[data-act="split-menu"]').textContent = this.isSplit() ? "분할 화면 닫기" : "화면 분할 (노트 2개 같이 보기)";
+    $('[data-act="split"]').classList.toggle("on", this.isSplit());
     $('[data-act="dark-pdf"]').textContent = (darkPdf() ? "✓ " : "") + "다크 모드에서 PDF도 어둡게";
   }
 
@@ -241,6 +290,37 @@ export class Editor {
       case "add":
         menu.classList.add("hidden");
         addMenu.classList.toggle("hidden");
+        break;
+      case "eraser-mode":
+        prefs.set("eraserMode", (this.eraserMode = btn.dataset.mode));
+        this.renderToolbar();
+        break;
+      case "eraser-size":
+        prefs.set("eraserSize", (this.eraserSize = Number(btn.dataset.n)));
+        this.renderToolbar();
+        break;
+      case "sidebar":
+        this.toggleSidebar();
+        break;
+      case "split":
+      case "split-menu":
+        menu.classList.add("hidden");
+        this.onSplit?.(this);
+        break;
+      case "goto-page": {
+        const pv = this.pageViews[Number(btn.dataset.idx)];
+        this.goToPage(Number(btn.dataset.idx));
+        pv?.el.classList.remove("flash");
+        void pv?.el.offsetWidth;
+        pv?.el.classList.add("flash");
+        if (this.root.clientWidth < 560) this.toggleSidebar(false);
+        break;
+      }
+      case "rec-pause":
+        this.toggleRecPause();
+        break;
+      case "rec-stop":
+        this.stopRecording();
         break;
       case "pick-image":
       case "pick-pdf":
@@ -286,7 +366,8 @@ export class Editor {
         this.exportPdf();
         break;
       case "record":
-        this.toggleRecord(btn);
+        if (this.recorder.active) this.toggleRecPause();
+        else this.startRecording();
         break;
       case "player":
         if (!this.doc.recordings.length) this.toast("녹음이 없어요. 마이크 버튼으로 녹음을 시작하세요.");
@@ -387,6 +468,138 @@ export class Editor {
         if (!pv.rendered) this.renderPage(pv);
       } else if (pv.rendered) this.release(pv);
     }
+    this.updateIndicator();
+  }
+
+  // ---------- page sidebar, indicator, last position ----------
+  buildSidebar() {
+    const bar = this.$(".sidebar");
+    this._thumbObs?.disconnect();
+    bar.innerHTML = this.pageViews
+      .map(
+        (pv, i) => `<button class="thumb-item" data-act="goto-page" data-idx="${i}">
+          <span class="thumb-box" style="aspect-ratio:${pv.page.w}/${pv.page.h}"><img alt="" /></span>
+          <span class="thumb-num">${i + 1}</span></button>`
+      )
+      .join("");
+    this._thumbVisible = new Set();
+    this._thumbObs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const pv = this.pageViews[Number(e.target.dataset.idx)];
+          if (!pv) continue;
+          if (e.isIntersecting) {
+            this._thumbVisible.add(pv.page.id);
+            this.showThumb(pv, e.target);
+          } else this._thumbVisible.delete(pv.page.id);
+        }
+      },
+      { root: bar, rootMargin: "300px 0px" }
+    );
+    bar.querySelectorAll(".thumb-item").forEach((el) => this._thumbObs.observe(el));
+    this._activeIdx = -1;
+    this.updateIndicator();
+  }
+
+  thumbEl(pageId) {
+    const i = this.pageViews.findIndex((pv) => pv.page.id === pageId);
+    return i < 0 ? null : this.$(`.thumb-item[data-idx="${i}"]`);
+  }
+
+  // Renders thumbnails one at a time so PDF pages do not pile up in memory.
+  showThumb(pv, el) {
+    const t = this.thumbs.get(pv.page.id);
+    if (t && !t.stale) {
+      el.querySelector("img").src = t.url;
+      return;
+    }
+    if (t?.pending) return;
+    this.thumbs.set(pv.page.id, { ...t, pending: true });
+    this._thumbQ = (this._thumbQ || Promise.resolve()).then(async () => {
+      try {
+        const c = await pageImage(this.doc, pv.page, 220);
+        const url = c.toDataURL("image/jpeg", 0.7);
+        c.width = c.height = 0;
+        this.thumbs.set(pv.page.id, { url, stale: false });
+        const img = this.thumbEl(pv.page.id)?.querySelector("img");
+        if (img) img.src = url;
+      } catch (e) {
+        this.thumbs.delete(pv.page.id);
+      }
+    });
+  }
+
+  staleThumb(pageId) {
+    const t = this.thumbs.get(pageId);
+    if (t) t.stale = true;
+    clearTimeout(this._thumbT);
+    this._thumbT = setTimeout(() => {
+      for (const id of this._thumbVisible || []) {
+        if (this.thumbs.get(id)?.stale) {
+          const el = this.thumbEl(id);
+          if (el) this.showThumb(this.pvOf(id), el);
+        }
+      }
+    }, 1200);
+  }
+
+  updateIndicator() {
+    if (!this.pageViews.length || !this.$(".sidebar")) return;
+    const i = this.pageViews.indexOf(this.currentPage().pv);
+    this.$(".page-indicator").textContent = `${i + 1} / ${this.pageViews.length}`;
+    if (i === this._activeIdx) return;
+    this.$(".thumb-item.active")?.classList.remove("active");
+    const el = this.$(`.thumb-item[data-idx="${i}"]`);
+    el?.classList.add("active");
+    if (el && this.sidebarOpen) el.scrollIntoView({ block: "nearest" });
+    this._activeIdx = i;
+  }
+
+  goToPage(i, frac = 0) {
+    const pv = this.pageViews[Math.min(Math.max(0, i), this.pageViews.length - 1)];
+    if (!pv) return;
+    this.scroller.scrollTop = pv.el.offsetTop - 12 + frac * pv.cssH;
+    this.updateVisible();
+  }
+
+  // Re-lays out pages after a width change without losing the reading position.
+  relayout() {
+    if (!this.pageViews.length) return this.layout();
+    const v = this.currentView();
+    this.layout();
+    this.goToPage(v.page, v.frac);
+  }
+
+  toggleSidebar(open = !this.sidebarOpen) {
+    if (open === this.sidebarOpen) return;
+    this.sidebarOpen = open;
+    prefs.set("sidebar", open);
+    this.$(".body").classList.toggle("sidebar-open", open);
+    this.relayout();
+    this._activeIdx = -1;
+    this.updateIndicator();
+  }
+
+  currentView() {
+    const { pv } = this.currentPage();
+    return {
+      page: this.pageViews.indexOf(pv),
+      frac: Math.round(((this.scroller.scrollTop - pv.el.offsetTop + 12) / pv.cssH) * 1000) / 1000,
+      zoom: this.zoom,
+    };
+  }
+
+  restoreView() {
+    const v = this.doc.view;
+    if (v && this.pageViews[v.page]) this.goToPage(v.page, v.frac || 0);
+  }
+
+  // Remembers where you were; saved without touching the note's modified date.
+  saveView() {
+    clearTimeout(this._viewT);
+    if (!this.pageViews.length) return;
+    this.doc.view = this.currentView();
+    putDoc(this.doc).catch(() => {});
   }
 
   release(pv) {
@@ -445,31 +658,33 @@ export class Editor {
     this.pageViews.push(pv);
     this.pagesEl.appendChild(pv.el);
     this.layout();
+    this.buildSidebar();
     this.scroller.scrollTo({ top: pv.el.offsetTop - 12, behavior: "smooth" });
     this.dirty();
   }
 
   // ---------- strokes, undo ----------
-  addStrokes(strokes) {
+  addStrokes(strokes, redraw = true) {
     for (const s of strokes) {
       this.doc.strokes.push(s);
       this.byPage.get(s.page).push(s);
     }
-    this.afterChange(strokes);
+    if (redraw) this.afterChange(strokes);
   }
-  removeStrokes(strokes) {
+  removeStrokes(strokes, redraw = true) {
     const set = new Set(strokes);
     this.doc.strokes = this.doc.strokes.filter((s) => !set.has(s));
     for (const s of strokes) {
       const arr = this.byPage.get(s.page);
       arr.splice(arr.indexOf(s), 1);
     }
-    this.afterChange(strokes);
+    if (redraw) this.afterChange(strokes);
   }
   afterChange(strokes) {
     for (const id of new Set(strokes.map((s) => s.page))) {
       const pv = this.pvOf(id);
       if (pv) this.redrawInk(pv);
+      this.staleThumb(id);
     }
     this.dirty();
   }
@@ -483,6 +698,15 @@ export class Editor {
       case "add":
       case "remove":
         (op.type === "add") !== reverse ? this.addStrokes(op.strokes) : this.removeStrokes(op.strokes);
+        break;
+      case "replace":
+        if (reverse) {
+          this.removeStrokes(op.added);
+          this.addStrokes(op.removed);
+        } else {
+          this.removeStrokes(op.removed);
+          this.addStrokes(op.added);
+        }
         break;
       case "item-add":
       case "item-del":
@@ -516,17 +740,20 @@ export class Editor {
     if (!this.doc.items.includes(item)) this.doc.items.push(item);
     const pv = this.pvOf(item.page);
     pv?.items.append(itemElement(item, pv.page, this.urlFor));
+    this.staleThumb(item.page);
     this.dirty();
   }
   removeItem(item) {
     if (this.selected === item) this.select(null);
     this.doc.items = this.doc.items.filter((i) => i !== item);
     this.itemEl(item)?.remove();
+    this.staleThumb(item.page);
     this.dirty();
   }
   refreshItem(item) {
     const el = this.itemEl(item);
     if (el) positionItem(el, item, this.pvOf(item.page).page);
+    this.staleThumb(item.page);
   }
   select(item) {
     this.selected = item;
@@ -592,6 +819,7 @@ export class Editor {
     const ref = this.pageViews[at + views.length]?.el || null;
     views.forEach((v) => this.pagesEl.insertBefore(v.el, ref));
     this.layout();
+    this.buildSidebar();
     this.scroller.scrollTo({ top: views[0].el.offsetTop - 12, behavior: "smooth" });
     this.dirty();
   }
@@ -660,12 +888,47 @@ export class Editor {
     let raf = 0;
     sc.addEventListener("scroll", () => {
       if (!raf) raf = requestAnimationFrame(() => ((raf = 0), this.updateVisible()));
+      clearTimeout(this._viewT);
+      this._viewT = setTimeout(() => this.saveView(), 1000);
     });
 
     this.pagesEl.addEventListener("pointerdown", (e) => this.onDown(e));
     window.addEventListener("pointermove", (this._move = (e) => this.onMove(e)));
     window.addEventListener("pointerup", (this._up = (e) => this.onUp(e)));
     window.addEventListener("pointercancel", (this._cancel = (e) => this.onUp(e, true)));
+
+    // Finger gestures: two-finger tap = undo, three-finger tap = redo,
+    // swipe right from the left edge = open page sidebar, swipe left on it = close.
+    let g = null;
+    const fingers = (e) => [...e.touches].filter((t) => t.touchType !== "stylus");
+    this.$(".body").addEventListener("touchstart", (e) => {
+      const f = fingers(e);
+      if (!f.length) return;
+      if (!g) {
+        const r = this.$(".body").getBoundingClientRect();
+        g = { t0: performance.now(), n: 0, moved: false, x0: f[0].clientX, y0: f[0].clientY, edge: f[0].clientX - r.left - (this.sidebarOpen ? 132 : 0) < 28 };
+      }
+      g.n = Math.max(g.n, f.length);
+    }, { passive: true });
+    this.$(".body").addEventListener("touchmove", (e) => {
+      if (!g) return;
+      const t = fingers(e)[0];
+      if (!t) return;
+      const dx = t.clientX - g.x0, dy = t.clientY - g.y0;
+      if (Math.hypot(dx, dy) > 12) g.moved = true;
+      if (g.n === 1 && Math.abs(dx) > 70 && Math.abs(dy) < 40) {
+        if (dx > 0 && g.edge && !this.sidebarOpen) this.toggleSidebar(true), (g.n = 9);
+        else if (dx < 0 && this.sidebarOpen && e.target.closest(".sidebar")) this.toggleSidebar(false), (g.n = 9);
+      }
+    }, { passive: true });
+    this.$(".body").addEventListener("touchend", (e) => {
+      if (!g || e.touches.length) return;
+      const tap = !g.moved && performance.now() - g.t0 < 320;
+      if (tap && g.n === 2) (this.undo(), this.toast("실행 취소", 900));
+      else if (tap && g.n === 3) (this.redo(), this.toast("다시 실행", 900));
+      g = null;
+    });
+    this.$(".body").addEventListener("touchcancel", () => (g = null));
 
     // Pinch zoom with two fingers.
     let pinch = null;
@@ -708,6 +971,7 @@ export class Editor {
     }, { passive: false });
 
     window.addEventListener("keydown", (this._key = (e) => {
+      if (Editor.focused !== this || e.target.matches?.("input, select, textarea")) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? this.redo() : this.undo();
@@ -741,7 +1005,10 @@ export class Editor {
       pageEl.setPointerCapture?.(e.pointerId);
     } catch {}
     if (this.tool === "eraser") {
-      this.active.erased = [];
+      this.active.erase = { removed: [], added: new Set() };
+      this.live.width = pv.ink.width;
+      this.live.height = pv.ink.height;
+      pv.el.appendChild(this.live);
       this.eraseAt(pv, this.pagePoint(pv, e));
       return;
     }
@@ -753,7 +1020,7 @@ export class Editor {
       color: hl ? this.hlColor : this.penColor,
       width: hl ? HL_SIZES[this.hlSize] : PEN_SIZES[this.penSize],
       pts: [],
-      audio: this.recorder.active ? { rec: this.recorder.id, t: Math.round(this.recorder.now() * 100) / 100 } : null,
+      audio: this.recorder.active && !this.recorder.paused ? { rec: this.recorder.id, t: Math.round(this.recorder.now() * 100) / 100 } : null,
     };
     this.active.stroke = s;
     this.addPoint(pv, e);
@@ -788,13 +1055,43 @@ export class Editor {
     });
   }
 
+  // Erases at a page point. Partial mode cuts strokes; stroke mode removes whole strokes.
+  // Tracks what this drag removed/added so it undoes as one step.
   eraseAt(pv, [x, y]) {
-    const r = ERASER_R / Math.max(1, this.zoom);
-    const hits = (this.byPage.get(pv.page.id) || []).filter((s) => hitStroke(s, x, y, r));
-    if (hits.length) {
-      this.active.erased.push(...hits);
-      this.removeStrokes(hits);
+    const er = this.active.erase;
+    const r = ERASER_SIZES[this.eraserSize];
+    this.drawEraserCursor(pv, x, y, r);
+    const strokes = this.byPage.get(pv.page.id) || [];
+    const removed = [], added = [];
+    for (const s of strokes) {
+      if (this.eraserMode === "stroke") {
+        if (hitStroke(s, x, y, r)) removed.push(s);
+        continue;
+      }
+      const pieces = cutStroke(s, x, y, r);
+      if (!pieces) continue;
+      removed.push(s);
+      for (const pts of pieces) added.push({ ...s, id: uid(), pts });
     }
+    if (!removed.length) return;
+    this.removeStrokes(removed, false);
+    if (added.length) this.addStrokes(added, false);
+    for (const s of removed) er.added.has(s) ? er.added.delete(s) : er.removed.push(s);
+    for (const s of added) er.added.add(s);
+    this.afterChange([...removed, ...added]);
+  }
+
+  drawEraserCursor(pv, x, y, r) {
+    const ctx = this.live.getContext("2d");
+    const k = this.live.width / pv.page.w;
+    ctx.clearRect(0, 0, this.live.width, this.live.height);
+    ctx.beginPath();
+    ctx.arc(x * k, y * k, r * k, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(120,120,120,0.12)";
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, k);
+    ctx.strokeStyle = "rgba(90,90,90,0.7)";
+    ctx.stroke();
   }
 
   onMove(e) {
@@ -808,7 +1105,7 @@ export class Editor {
     }
     if (!a.draw) return;
     e.preventDefault();
-    if (this.tool === "eraser" && a.erased) {
+    if (this.tool === "eraser" && a.erase) {
       const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
       for (const ev of evs.length ? evs : [e]) this.eraseAt(a.pv, this.pagePoint(a.pv, ev));
     } else if (a.stroke) {
@@ -841,7 +1138,9 @@ export class Editor {
       }
     }
     if (cancelled) return;
-    if (a.erased?.length) this.pushUndo({ type: "remove", strokes: a.erased });
+    if (a.erase && (a.erase.removed.length || a.erase.added.size)) {
+      this.pushUndo({ type: "replace", removed: a.erase.removed, added: [...a.erase.added] });
+    }
     if (a.stroke && a.stroke.pts.length) {
       this.addStrokes([a.stroke]);
       this.pushUndo({ type: "add", strokes: [a.stroke] });
@@ -856,32 +1155,52 @@ export class Editor {
   }
 
   // ---------- audio ----------
-  async toggleRecord(btn) {
-    if (this.recorder.active) {
-      clearInterval(this._recTimer);
-      btn.classList.remove("recording");
-      btn.querySelector(".rec-time").textContent = "";
-      const entry = await this.recorder.stop();
-      if (entry) {
-        this.doc.recordings.push(entry);
-        this.dirty();
-        this.toast(`${entry.name} 저장됨 (${fmtTime(entry.duration)})`);
-      }
-      return;
-    }
+  async startRecording() {
     try {
       if (this.player.recording) this.player.audio.pause();
       const id = this.doc.nextRec++;
       await this.recorder.start(id);
-      btn.classList.add("recording");
-      const label = btn.querySelector(".rec-time");
-      label.textContent = "0:00";
-      this._recTimer = setInterval(() => (label.textContent = fmtTime(this.recorder.now())), 500);
+      this.$(".recbar").classList.remove("hidden");
+      this.updateRecUI();
+      this._recTimer = setInterval(() => this.updateRecUI(), 500);
       this.toast("녹음 중이에요. 지금 쓰는 필기가 녹음 시점과 연결돼요.");
     } catch (err) {
       this.doc.nextRec--;
       this.toast("마이크를 사용할 수 없어요: " + (err.message || err), 4000);
     }
+  }
+
+  toggleRecPause() {
+    if (!this.recorder.active) return;
+    this.recorder.paused ? this.recorder.resume() : this.recorder.pause();
+    this.updateRecUI();
+  }
+
+  async stopRecording() {
+    if (!this.recorder.active) return;
+    clearInterval(this._recTimer);
+    this.$(".recbar").classList.add("hidden");
+    this.$('[data-act="record"]').classList.remove("recording");
+    const entry = await this.recorder.stop();
+    if (entry) {
+      this.doc.recordings.push(entry);
+      this.dirty();
+      this.toast(`${entry.name} 저장됨 (${fmtTime(entry.duration)}). ▶ 버튼으로 들을 수 있어요.`);
+    }
+  }
+
+  updateRecUI() {
+    const paused = this.recorder.paused;
+    const bar = this.$(".recbar");
+    bar.classList.toggle("paused", paused);
+    bar.querySelector(".rec-label").textContent = paused ? "일시정지됨" : "녹음 중";
+    bar.querySelector(".rec-clock").textContent = fmtTime(this.recorder.now());
+    bar.querySelector('[data-act="rec-pause"]').innerHTML = paused
+      ? `${icon("rec")}<span>계속 녹음</span>`
+      : `${icon("pause")}<span>일시정지</span>`;
+    const mic = this.$('[data-act="record"]');
+    mic.classList.toggle("recording", !paused);
+    mic.title = paused ? "녹음 계속" : "녹음 일시정지";
   }
 
   async openPlayer(recId) {
@@ -893,7 +1212,7 @@ export class Editor {
       .map((r) => `<option value="${r.id}"${r.id === recId ? " selected" : ""}>${r.name} (${fmtTime(r.duration)})</option>`)
       .join("");
     bar.classList.remove("hidden");
-    this.root.classList.add("with-player");
+
     await this.player.load(rec);
     this.$(".dur").textContent = fmtTime(this.player.duration);
     this.onTime();
@@ -903,7 +1222,7 @@ export class Editor {
   closePlayer() {
     this.player.close();
     this.$(".playerbar").classList.add("hidden");
-    this.root.classList.remove("with-player");
+
     this.redrawVisible();
   }
 
@@ -978,10 +1297,12 @@ export class Editor {
   }
 
   async close() {
-    if (this.recorder.active) await this.toggleRecord(this.$('[data-act="record"]'));
+    await this.stopRecording();
+    this.saveView();
     this.player.close();
     await this.saveNow(true);
-    window.removeEventListener("resize", this._resize);
+    this._ro.disconnect();
+    clearTimeout(this._roT);
     window.removeEventListener("pointermove", this._move);
     window.removeEventListener("pointerup", this._up);
     window.removeEventListener("pointercancel", this._cancel);
@@ -989,6 +1310,7 @@ export class Editor {
     document.removeEventListener("pointerdown", this._menuCloser);
     document.removeEventListener("visibilitychange", this._visibility);
     this._offTheme();
+    this._thumbObs?.disconnect();
     this.pageViews.forEach((pv) => this.release(pv));
     for (const p of this.urls.values()) p.then((u) => u && URL.revokeObjectURL(u));
   }
