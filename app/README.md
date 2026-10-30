@@ -3,7 +3,7 @@
 Penote is a handwriting note app for iPad and the web. It is a static web app (PWA) with no build step.
 
 - Apple Pencil writing with pressure: pen (7 colours including black), highlighter, and an eraser that rubs out parts of strokes or removes whole strokes. Undo and redo are available.
-- Undo and redo sit in their own group at the top left. Gestures: two-finger tap undoes and three-finger tap redoes. Swipe in from the left edge to open page thumbnails.
+- Undo and redo sit in their own group in the top-right corner. Double-tap the Pencil tip on the same spot to switch between the eraser and your previous tool (web apps do not receive the Pencil's barrel double-tap). Gestures: two-finger tap undoes and three-finger tap redoes. Swipe in from the left edge to open page thumbnails.
 - Page thumbnail sidebar with the current page number; tap a page to jump to it. A note reopens at the page you were reading.
 - Split view: open two notes side by side. Drag the divider to resize, double-tap it for 50/50, or drag it to an edge to close that side.
   - Fingers scroll and pinch-zoom by default. Turn off "Apple Pencil로만 쓰기" to draw with a finger.

@@ -627,11 +627,11 @@ function fly(from, to, img, { duration = 460, tilt = true } = {}) {
   document.body.append(el);
   const sx = from.width / to.width, sy = from.height / to.height;
   const dx = from.left - to.left, dy = from.top - to.top;
+  // Transform only (GPU-composited); animating shadows or radii repaints every frame.
   const anim = el.animate(
     [
-      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})${tilt ? " perspective(1200px) rotateX(10deg)" : ""}`, borderRadius: "14px", boxShadow: "0 2px 8px rgba(0,0,0,.12)" },
-      { offset: 0.7, borderRadius: "6px", boxShadow: "0 30px 80px rgba(16,24,40,.25)" },
-      { transform: "none", borderRadius: "3px", boxShadow: "0 12px 32px rgba(16,24,40,.12)" },
+      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})${tilt ? " perspective(1200px) rotateX(10deg)" : ""}` },
+      { transform: "none" },
     ],
     { duration, easing: "cubic-bezier(.2,.8,.2,1)", fill: "forwards" }
   );
@@ -648,7 +648,7 @@ async function openNote(id, push = true, fromEl = null) {
   root.className = "editor" + (from ? " note-enter" : " screen-in");
   root.innerHTML = `<div class="panes"></div>`;
   panes.length = 0;
-  const pane = addPane(doc);
+  const pane = addPane(doc, false, !!from);
   if (!from) return;
   await new Promise((r) => requestAnimationFrame(r));
   const target = pane.editor.currentPage?.().pv?.el.getBoundingClientRect();
@@ -675,17 +675,14 @@ async function runFlyBack() {
   document.body.append(el);
   const sx = fb.rect.width / to.width, sy = fb.rect.height / to.height;
   await el.animate(
-    [
-      { transform: `translate(${fb.rect.left - to.left}px, ${fb.rect.top - to.top}px) scale(${sx}, ${sy})`, borderRadius: "3px" },
-      { transform: "none", borderRadius: "14px" },
-    ],
+    [{ transform: `translate(${fb.rect.left - to.left}px, ${fb.rect.top - to.top}px) scale(${sx}, ${sy})` }, { transform: "none" }],
     { duration: 380, easing: "cubic-bezier(.2,.8,.2,1)", fill: "forwards" }
   ).finished;
   thumb.style.visibility = "";
   el.remove();
 }
 
-function addPane(doc, animate = false) {
+function addPane(doc, animate = false, deferRender = false) {
   const panesEl = root.querySelector(".panes");
   const el = document.createElement("div");
   el.className = "pane" + (animate ? " opening" : "");
@@ -706,6 +703,7 @@ function addPane(doc, animate = false) {
     onExit: () => closePane(pane),
     onSplit: (ed) => toggleSplit(ed),
     isSplit: () => panes.length > 1,
+    deferRender,
   });
   window.__editor = pane.editor;
   window.__panes = panes;
