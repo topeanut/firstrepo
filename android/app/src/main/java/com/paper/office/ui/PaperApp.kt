@@ -307,7 +307,7 @@ private fun PdfPage(repo: PdfRepository, index: Int, renderWidth: Int) {
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = "페이지 ${index + 1}",
                 modifier = Modifier.fillMaxWidth(),
-                contentScale = ContentScale.FitWidth,
+                contentScale = ContentScale.FillWidth,
             )
         } else {
             Box(
