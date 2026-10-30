@@ -5,18 +5,23 @@ import { openPdfData, pageSizes } from "./pdf.js";
 import { putBlob, uid } from "./db.js";
 import { PAGE_W, newDoc } from "./model.js";
 
-export async function importPdf(file) {
+// Stores a PDF and returns one page per PDF page.
+export async function pdfPages(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await openPdfData(bytes.slice());
   const key = "pdf-" + uid();
   await putBlob(key, new Blob([bytes], { type: "application/pdf" }));
-  const doc = newDoc(file.name.replace(/\.pdf$/i, ""));
-  doc.pages = (await pageSizes(pdf)).map(([w, h], i) => ({
+  return (await pageSizes(pdf)).map(([w, h], i) => ({
     id: uid(),
     w: PAGE_W,
     h: (PAGE_W * h) / w,
     bg: { type: "pdf", pdf: key, page: i + 1 },
   }));
+}
+
+export async function importPdf(file) {
+  const doc = newDoc(file.name.replace(/\.pdf$/i, ""));
+  doc.pages = await pdfPages(file);
   return doc;
 }
 

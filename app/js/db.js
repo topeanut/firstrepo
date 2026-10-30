@@ -50,6 +50,7 @@ export async function deleteNote(id) {
   if (doc) {
     for (const p of doc.pages) if (p.bg.pdf) keys.add(p.bg.pdf);
     for (const r of doc.recordings) keys.add(r.blob);
+    for (const i of doc.items || []) keys.add(i.blob);
   }
   await tx("blobs", "readwrite", (s) => keys.forEach((k) => s.delete(k)));
   await tx("docs", "readwrite", (s) => s.delete(id));
