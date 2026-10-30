@@ -21,6 +21,8 @@ import com.paper.office.doc.DeviceFiles
 import com.paper.office.doc.DocKind
 import com.paper.office.doc.DocRef
 import com.paper.office.doc.DocTypes
+import com.paper.office.doc.PdfEditModel
+import com.paper.office.doc.PdfExporter
 import com.paper.office.doc.TextIO
 import com.paper.office.ui.PaperApp
 import com.paper.office.ui.theme.PaperTheme
@@ -47,6 +49,11 @@ class MainActivity : ComponentActivity() {
             uri?.let { onFolderPicked(it) }
         }
 
+    private val createPdf =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+            uri?.let { vm.exportPdfTo(it) }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -58,6 +65,7 @@ class MainActivity : ComponentActivity() {
                     onOpen = { openDoc.launch(arrayOf("*/*")) },
                     onSaveAs = { suggestedName -> createDoc.launch(suggestedName) },
                     onPickFolder = { openTree.launch(null) },
+                    onExportPdf = { suggestedName -> createPdf.launch(suggestedName) },
                 )
             }
         }
@@ -105,6 +113,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var editorText by mutableStateOf("")
     private var editorLoadedFor: Uri? = null
 
+    // PDF 편집 상태 + 스낵바 메시지
+    var pdfEdit by mutableStateOf<PdfEditModel?>(null)
+    var toastMessage by mutableStateOf<String?>(null)
+
     init {
         loadRecents()
         restoreFolder()
@@ -145,6 +157,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun openDeviceFile(entry: DeviceFiles.Entry) {
         current = DocRef(entry.uri, entry.name, entry.kind)
         editorLoadedFor = null
+        pdfEdit = null
         addRecent(current!!)
     }
 
@@ -154,16 +167,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val kind = DocTypes.detect(ctx, uri, name)
         current = DocRef(uri, name, kind)
         editorLoadedFor = null
+        pdfEdit = null
         addRecent(current!!)
     }
 
     fun openRef(ref: DocRef) {
         current = ref
         editorLoadedFor = null
+        pdfEdit = null
     }
 
     fun close() {
         current = null
+        pdfEdit = null
+    }
+
+    fun exportPdfTo(uri: Uri) {
+        val src = current?.uri ?: return
+        val model = pdfEdit ?: return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { PdfExporter.export(getApplication(), src, model, uri) }
+            if (ok) model.dirty = false
+            toastMessage = if (ok) "PDF 저장 완료" else "저장 중 오류가 발생했어요"
+        }
     }
 
     fun ensureEditorLoaded(ref: DocRef) {
