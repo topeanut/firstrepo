@@ -471,8 +471,9 @@ private fun DocumentScreen(
                 DocKind.TEXT, DocKind.CSV, DocKind.MARKDOWN -> TextEditorView(vm, ref)
                 DocKind.DOCX -> DocxView(ref)
                 DocKind.XLSX -> SheetView(ref)
+                DocKind.PPTX -> PptxView(ref)
                 DocKind.IMAGE -> ImageView(ref)
-                DocKind.PPTX, DocKind.HWP, DocKind.UNKNOWN -> UnsupportedView(ref)
+                DocKind.HWP, DocKind.UNKNOWN -> UnsupportedView(ref)
             }
         }
     }
@@ -730,6 +731,36 @@ private fun DocxView(ref: DocRef) {
     }
     when (val t = text) {
         null -> CenterMessage("문서를 읽는 중…", spinner = true)
+        else -> {
+            val scroll = rememberScrollState()
+            Box(Modifier.fillMaxSize()) {
+                SelectionContainer {
+                    Text(
+                        text = t.ifBlank { "(표시할 텍스트가 없습니다)" },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(scroll)
+                            .padding(start = 24.dp, top = 20.dp, end = 16.dp, bottom = 20.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                ScrollLeftScrollbar(scroll)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  PPTX (읽기, 슬라이드 텍스트)
+// ---------------------------------------------------------------------------
+@Composable
+private fun PptxView(ref: DocRef) {
+    val context = LocalContext.current
+    val text by produceState(initialValue = null as String?, ref.uri) {
+        value = withContext(Dispatchers.IO) { runCatching { OfficeReaders.readPptxText(context, ref.uri) }.getOrNull() }
+    }
+    when (val t = text) {
+        null -> CenterMessage("프레젠테이션을 읽는 중…", spinner = true)
         else -> {
             val scroll = rememberScrollState()
             Box(Modifier.fillMaxSize()) {

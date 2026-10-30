@@ -35,6 +35,7 @@ object OfficeReaders {
         .replace("&amp;", "&")
 
     private val T_TAG = Regex("<(?:w:)?t(?:\\s[^>]*)?>(.*?)</(?:w:)?t>", RegexOption.DOT_MATCHES_ALL)
+    private val A_T_TAG = Regex("<a:t>(.*?)</a:t>", RegexOption.DOT_MATCHES_ALL)
 
     // ---- DOCX → 문단 텍스트 ----
     fun readDocxText(context: Context, uri: Uri): String {
@@ -49,6 +50,27 @@ object OfficeReaders {
         }
         return sb.toString().trim('\n')
     }
+
+    // ---- PPTX → 슬라이드별 텍스트 ----
+    fun readPptxText(context: Context, uri: Uri): String {
+        val parts = readZipEntries(context, uri) {
+            it.startsWith("ppt/slides/slide") && it.endsWith(".xml")
+        }
+        if (parts.isEmpty()) return ""
+        val sorted = parts.keys.sortedBy { slideNum(it) }
+        val sb = StringBuilder()
+        sorted.forEachIndexed { i, name ->
+            val xml = parts[name] ?: return@forEachIndexed
+            val texts = A_T_TAG.findAll(xml).map { unescape(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
+            sb.append("— 슬라이드 ${i + 1} —\n")
+            if (texts.isNotEmpty()) sb.append(texts.joinToString("\n"))
+            sb.append("\n\n")
+        }
+        return sb.toString().trim()
+    }
+
+    private fun slideNum(name: String): Int =
+        Regex("slide(\\d+)\\.xml").find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
     // ---- XLSX → 첫 시트의 행/열 ----
     data class Sheet(val name: String, val rows: List<List<String>>)
