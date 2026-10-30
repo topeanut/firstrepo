@@ -37,7 +37,7 @@ const prefs = {
 
 export class Editor {
   // opts: { onExit, onSplit, isSplit } — onSplit opens/closes the second pane (app.js).
-  constructor(root, doc, { onExit, onSplit = null, isSplit = () => false }) {
+  constructor(root, doc, { onExit, onSplit = null, isSplit = () => false, deferRender = false }) {
     this.root = root;
     this.doc = doc;
     this.onExit = onExit;
@@ -66,10 +66,14 @@ export class Editor {
     this.replay = true;
     this.thumbs = new Map(); // page id -> { url, stale }
     if (doc.view?.zoom) this.zoom = doc.view.zoom;
+    // While the page-open animation plays, keep the main thread free: render right after it.
+    if (deferRender) this.holdRender(520);
     this.build();
     this.root.querySelector(".body").classList.toggle("sidebar-open", this.sidebarOpen);
     this.layout();
-    this.buildSidebar();
+    // The page thumbnails are built after an opening animation, not during it.
+    if (deferRender) setTimeout(() => this.buildSidebar(), 480);
+    else this.buildSidebar();
     this.restoreView();
     this.bindInput();
     this.saveTimer = null;
@@ -81,10 +85,6 @@ export class Editor {
       <header class="toolbar">
         <div class="tb-group tb-left">
           <button class="icon-btn" data-act="back" title="라이브러리">${icon("back")}</button>
-          <div class="undo-group" role="group" aria-label="실행 취소">
-            <button class="icon-btn" data-act="undo" title="실행 취소 (두 손가락 탭)">${icon("undo")}</button>
-            <button class="icon-btn" data-act="redo" title="다시 실행 (세 손가락 탭)">${icon("redo")}</button>
-          </div>
           <button class="icon-btn hide-narrow" data-act="sidebar" title="페이지 미리보기">${icon("pages")}</button>
           <input class="title-input" value="" aria-label="노트 제목" />
         </div>
@@ -106,6 +106,10 @@ export class Editor {
           <button class="icon-btn" data-act="player" title="녹음 듣기">${icon("play")}</button>
           <button class="icon-btn hide-narrow" data-act="split" title="화면 분할">${icon("split")}</button>
           <button class="icon-btn" data-act="more" title="더보기">${icon("more")}</button>
+          <div class="undo-group" role="group" aria-label="실행 취소">
+            <button class="icon-btn" data-act="undo" title="실행 취소 (두 손가락 탭)">${icon("undo")}</button>
+            <button class="icon-btn" data-act="redo" title="다시 실행 (세 손가락 탭)">${icon("redo")}</button>
+          </div>
         </div>
       </header>
       <div class="menu hidden" role="menu">
@@ -485,11 +489,12 @@ export class Editor {
     this.scheduleDetail();
   }
 
-  holdRender(ms = 260) {
+  holdRender(ms = 260, all = ms > 400) {
     this._hold = true;
+    this._holdAll = all;
     clearTimeout(this._holdT);
     this._holdT = setTimeout(() => {
-      this._hold = false;
+      this._hold = this._holdAll = false;
       this.updateVisible();
     }, ms);
   }
@@ -541,7 +546,7 @@ export class Editor {
       if (near.has(pv)) {
         // Right after a zoom, re-rendering waits a moment (the stretched bitmap and vector ink
         // look fine) so the gesture's last frames stay smooth.
-        if (!pv.rendered || (pv.needsRender && !this._hold)) this.renderPage(pv);
+        if ((!pv.rendered && !this._holdAll) || (pv.needsRender && !this._hold)) this.renderPage(pv);
       } else if (pv.rendered && !keep.has(pv)) this.release(pv);
     }
     this.updateIndicator();
@@ -592,7 +597,8 @@ export class Editor {
     if (t?.pending) return;
     this.thumbs.set(pv.page.id, { ...t, pending: true });
     this._thumbQ = (this._thumbQ || Promise.resolve()).then(async () => {
-      while (this.active || this.exporting) await new Promise((r) => setTimeout(r, 400));
+      // Thumbnails are background work: wait for pen-up, exports and open/zoom animations.
+      while (this.active || this.exporting || this._hold) await new Promise((r) => setTimeout(r, 400));
       try {
         const c = await pageImage(this.doc, pv.page, 220);
         const url = c.toDataURL("image/jpeg", 0.7);
@@ -1244,7 +1250,9 @@ export class Editor {
           if (!pinch) return;
           pinch.raf = 0;
           const t = target(pinch);
-          this.pagesEl.style.transform = `translate3d(${t.tx}px, ${t.ty}px, 0) scale(${pinch.k})`;
+          // 2D on purpose: a 3D transform/will-change makes Safari create a layer (blurry ink,
+          // white flash when it is torn down).
+          this.pagesEl.style.transform = `translate(${t.tx}px, ${t.ty}px) scale(${pinch.k})`;
         });
       }
     }, { passive: false });
@@ -1304,7 +1312,7 @@ export class Editor {
       if (e.pointerType === "touch") return; // finger on empty space: scroll
     }
     const draw = this.canDraw(e) && e.button === 0 && this.tool !== "select";
-    this.active = { id: e.pointerId, pv, t0: performance.now(), x0: e.clientX, y0: e.clientY, draw, moved: false };
+    this.active = { id: e.pointerId, pv, t0: performance.now(), x0: e.clientX, y0: e.clientY, draw, moved: false, undoLen: this.undoStack.length, pen: e.pointerType === "pen" };
     if (!draw) return; // finger: maybe a tap on ink while playing back
     e.preventDefault();
     try {
@@ -1312,7 +1320,7 @@ export class Editor {
     } catch {}
     if (this.tool === "eraser") {
       this.active.erase = { removed: [], added: new Set() };
-      this.eraseAt(pv, this.pagePoint(pv, e));
+      this.queueErase(pv, this.pagePoint(pv, e));
       return;
     }
     const hl = this.tool === "hl";
@@ -1353,28 +1361,65 @@ export class Editor {
       this._liveRaf = 0;
       const a = this.active;
       if (!a?.stroke || !a.livePath) return;
-      const s = a.pred?.length ? { ...a.stroke, pts: a.stroke.pts.concat(...a.pred) } : a.stroke;
+      const s = a.stroke;
       a.livePath.setAttribute("d", s.tool === "hl" ? hlPath(s) : penPath(s));
     });
   }
 
-  // Erases at a page point. Partial mode cuts strokes; stroke mode removes whole strokes.
-  // Tracks what this drag removed/added so it undoes as one step.
-  eraseAt(pv, [x, y]) {
-    const er = this.active.erase;
+  // Eraser input is queued and applied once per animation frame: the Pencil reports ~240
+  // positions a second, and editing the stroke list for each one made erasing lag.
+  queueErase(pv, pt) {
+    const a = this.active;
+    a.erasePts ||= [];
+    // Fill gaps between samples so a fast swipe cannot skip over thin ink.
+    const last = a.eraseLast;
     const r = ERASER_SIZES[this.eraserSize];
-    this.drawEraserCursor(pv, x, y, r);
-    const strokes = this.byPage.get(pv.page.id) || [];
+    if (last) {
+      const d = Math.hypot(pt[0] - last[0], pt[1] - last[1]);
+      const n = Math.floor(d / (r * 0.6));
+      for (let k = 1; k <= n; k++) a.erasePts.push([last[0] + ((pt[0] - last[0]) * k) / (n + 1), last[1] + ((pt[1] - last[1]) * k) / (n + 1)]);
+    }
+    a.erasePts.push(pt);
+    a.eraseLast = pt;
+    if (!this._eraseRaf) this._eraseRaf = requestAnimationFrame(() => {
+      this._eraseRaf = 0;
+      if (this.active === a) this.flushErase(pv);
+    });
+  }
+
+  // Applies all queued eraser points. Partial mode cuts strokes; stroke mode removes whole
+  // strokes. Tracks what this drag removed/added so it undoes as one step.
+  flushErase(pv) {
+    const a = this.active;
+    const pts = a?.erasePts;
+    if (!pts?.length) return;
+    a.erasePts = [];
+    const er = a.erase;
+    const r = ERASER_SIZES[this.eraserSize];
+    const [cx, cy] = pts[pts.length - 1];
+    this.drawEraserCursor(pv, cx, cy, r);
     const removed = [], added = [];
-    for (const s of strokes) {
+    for (const s of this.byPage.get(pv.page.id) || []) {
       if (this.eraserMode === "stroke") {
-        if (hitStroke(s, x, y, r)) removed.push(s);
+        if (pts.some(([x, y]) => hitStroke(s, x, y, r))) removed.push(s);
         continue;
       }
-      const pieces = cutStroke(s, x, y, r);
+      // Cut the stroke by every point of this frame, keeping the surviving pieces.
+      let pieces = null;
+      for (const [x, y] of pts) {
+        const cur = pieces || [s.pts];
+        const next = [];
+        let hit = false;
+        for (const piece of cur) {
+          const cut = cutStroke(piece === s.pts ? s : { ...s, pts: piece }, x, y, r);
+          if (cut) (hit = true), next.push(...cut);
+          else next.push(piece);
+        }
+        if (hit) pieces = next;
+      }
       if (!pieces) continue;
       removed.push(s);
-      for (const pts of pieces) added.push({ ...s, id: uid(), pts });
+      for (const p of pieces) added.push({ ...s, id: uid(), pts: p });
     }
     if (!removed.length) return;
     this.removeStrokes(removed, false);
@@ -1411,13 +1456,9 @@ export class Editor {
     e.preventDefault();
     if (this.tool === "eraser" && a.erase) {
       const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-      for (const ev of evs.length ? evs : [e]) this.eraseAt(a.pv, this.pagePoint(a.pv, ev));
+      for (const ev of evs.length ? evs : [e]) this.queueErase(a.pv, this.pagePoint(a.pv, ev));
     } else if (a.stroke) {
       this.addPoint(a.pv, e);
-      // Predicted points (where supported) are shown but never stored: the line keeps up with the
-      // pen tip instead of trailing a frame behind.
-      const pred = e.getPredictedEvents?.() || [];
-      a.pred = pred.slice(0, 2).map((ev) => [...this.pagePoint(a.pv, ev), ev.pressure || 0.5]);
       this.drawLive();
     }
   }
@@ -1450,6 +1491,11 @@ export class Editor {
       }
     }
     if (cancelled) return;
+    if (a.erase) {
+      this.active = a;
+      this.flushErase(a.pv);
+      this.active = null;
+    }
     if (a.erase && (a.erase.removed.length || a.erase.added.size)) {
       this.pushUndo({ type: "replace", removed: a.erase.removed, added: [...a.erase.added] });
     }
@@ -1463,6 +1509,32 @@ export class Editor {
       this.dirty();
       this.pushUndo({ type: "add", strokes: [s] });
     }
+    if (quickTap && a.pen && (a.stroke || a.erase)) this.onPencilTap(e, a);
+  }
+
+  // Apple Pencil's barrel double-tap is not delivered to web apps, so a quick double tap of the
+  // pencil tip on the same spot switches between the eraser and the previous tool instead.
+  // The two taps leave nothing behind: their dots/erasures are rolled back.
+  onPencilTap(e, a) {
+    const ops = this.undoStack.slice(a.undoLen);
+    const now = performance.now();
+    const prev = this._penTap;
+    if (prev && now - prev.t < 350 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 10) {
+      this._penTap = null;
+      for (const op of [...prev.ops, ...ops].reverse()) {
+        const i = this.undoStack.lastIndexOf(op);
+        if (i < 0) continue;
+        this.undoStack.splice(i, 1);
+        this.applyOp(op, true);
+      }
+      this.updateUndoUI();
+      if (this.tool === "eraser") this.setTool(this._toolBeforeEraser || "pen");
+      else {
+        this._toolBeforeEraser = this.tool;
+        this.setTool("eraser");
+      }
+      this.toast(this.tool === "eraser" ? "지우개" : this.tool === "hl" ? "형광펜" : "펜", 900);
+    } else this._penTap = { t: now, x: e.clientX, y: e.clientY, ops };
   }
 
   cancelStroke() {
