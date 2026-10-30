@@ -143,6 +143,7 @@ fun PaperApp(
     onPickFolder: () -> Unit,
     onExportPdf: (String) -> Unit,
     onExportXlsx: (String) -> Unit,
+    onExportDocx: (String) -> Unit,
     onRequestStorage: () -> Unit,
 ) {
     AnimatedContent(
@@ -166,7 +167,8 @@ fun PaperApp(
         } else {
             DocumentScreen(
                 vm = vm, ref = target, onOpen = onOpen, onSaveAs = onSaveAs,
-                onExportPdf = onExportPdf, onExportXlsx = onExportXlsx, onBack = { vm.close() },
+                onExportPdf = onExportPdf, onExportXlsx = onExportXlsx, onExportDocx = onExportDocx,
+                onBack = { vm.close() },
             )
         }
     }
@@ -469,6 +471,7 @@ private fun DocumentScreen(
     onSaveAs: (String) -> Unit,
     onExportPdf: (String) -> Unit,
     onExportXlsx: (String) -> Unit,
+    onExportDocx: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
@@ -522,7 +525,18 @@ private fun DocumentScreen(
                                 })
                             }
                         }
-                        DocKind.DOCX, DocKind.PPTX -> {
+                        DocKind.DOCX -> {
+                            IconButton(onClick = { vm.bumpTextScale(-0.1f) }) {
+                                Icon(Icons.Filled.TextDecrease, contentDescription = "글자 작게")
+                            }
+                            IconButton(onClick = { vm.bumpTextScale(0.1f) }) {
+                                Icon(Icons.Filled.TextIncrease, contentDescription = "글자 크게")
+                            }
+                            IconButton(onClick = { onExportDocx(ref.name.removeSuffix(".docx") + "-편집.docx") }) {
+                                Icon(Icons.Filled.Save, contentDescription = "저장")
+                            }
+                        }
+                        DocKind.PPTX -> {
                             IconButton(onClick = { vm.bumpTextScale(-0.1f) }) {
                                 Icon(Icons.Filled.TextDecrease, contentDescription = "글자 작게")
                             }
@@ -556,7 +570,7 @@ private fun DocumentScreen(
             when (ref.kind) {
                 DocKind.PDF -> PdfEditorView(vm, ref)
                 DocKind.TEXT, DocKind.CSV, DocKind.MARKDOWN -> TextEditorView(vm, ref)
-                DocKind.DOCX -> DocxView(ref, vm.textScale)
+                DocKind.DOCX -> DocxView(vm, ref)
                 DocKind.XLSX -> SheetView(vm, ref)
                 DocKind.PPTX -> PptxView(ref, vm.textScale)
                 DocKind.IMAGE -> ImageView(ref)
@@ -872,31 +886,23 @@ private fun TextEditorView(vm: AppViewModel, ref: DocRef) {
 //  DOCX (읽기)
 // ---------------------------------------------------------------------------
 @Composable
-private fun DocxView(ref: DocRef, textScale: Float) {
-    val context = LocalContext.current
-    val text by produceState(initialValue = null as String?, ref.uri) {
-        value = withContext(Dispatchers.IO) { runCatching { OfficeReaders.readDocxText(context, ref.uri) }.getOrNull() }
+private fun DocxView(vm: AppViewModel, ref: DocRef) {
+    var loaded by remember(ref.uri) { mutableStateOf(false) }
+    LaunchedEffect(ref.uri) {
+        withContext(Dispatchers.IO) { runCatching { vm.ensureDocxLoaded(ref) } }
+        loaded = true
     }
-    when (val t = text) {
-        null -> CenterMessage("문서를 읽는 중…", spinner = true)
-        else -> {
-            val scroll = rememberScrollState()
-            Box(Modifier.fillMaxSize()) {
-                SelectionContainer {
-                    Text(
-                        text = t.ifBlank { "(표시할 텍스트가 없습니다)" },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(scroll)
-                            .padding(start = 24.dp, top = 20.dp, end = 16.dp, bottom = 20.dp),
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontSize = MaterialTheme.typography.bodyLarge.fontSize * textScale,
-                        ),
-                    )
-                }
-                ScrollLeftScrollbar(scroll)
-            }
-        }
+    if (!loaded) {
+        CenterMessage("문서를 읽는 중…", spinner = true)
+    } else {
+        OutlinedTextField(
+            value = vm.docxText,
+            onValueChange = { vm.docxText = it },
+            modifier = Modifier.fillMaxSize().padding(8.dp),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                fontSize = MaterialTheme.typography.bodyLarge.fontSize * vm.textScale,
+            ),
+        )
     }
 }
 

@@ -51,6 +51,21 @@ object OfficeReaders {
         return sb.toString().trim('\n')
     }
 
+    private val W_P_RE = Regex("<w:p\\b[^>]*>.*?</w:p>|<w:p\\b[^>]*/>", RegexOption.DOT_MATCHES_ALL)
+
+    /** DOCX 를 문단 단위 텍스트 리스트로(편집·되쓰기용, 1:1 매핑 보장). */
+    fun readDocxParagraphs(context: Context, uri: Uri): List<String> {
+        val parts = readZipEntries(context, uri) { it == "word/document.xml" }
+        val xml = parts["word/document.xml"] ?: return emptyList()
+        val out = ArrayList<String>()
+        for (m in W_P_RE.findAll(xml)) {
+            val sb = StringBuilder()
+            for (t in T_TAG.findAll(m.value)) sb.append(unescape(t.groupValues[1]))
+            out.add(sb.toString())
+        }
+        return out
+    }
+
     // ---- PPTX → 슬라이드별 텍스트 ----
     fun readPptxText(context: Context, uri: Uri): String {
         val parts = readZipEntries(context, uri) {
