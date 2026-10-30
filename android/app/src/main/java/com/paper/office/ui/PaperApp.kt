@@ -1,6 +1,14 @@
 package com.paper.office.ui
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -8,6 +16,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -127,14 +137,30 @@ fun PaperApp(
     onExportPdf: (String) -> Unit,
     onRequestStorage: () -> Unit,
 ) {
-    val current = vm.current
-    if (current == null) {
-        HomeScreen(vm = vm, onOpen = onOpen, onRequestStorage = onRequestStorage)
-    } else {
-        DocumentScreen(
-            vm = vm, ref = current, onOpen = onOpen, onSaveAs = onSaveAs,
-            onExportPdf = onExportPdf, onBack = { vm.close() },
-        )
+    AnimatedContent(
+        targetState = vm.current,
+        transitionSpec = {
+            val opening = targetState != null
+            if (opening) {
+                // 문서를 열 때: 새 페이지가 위로 떠오르듯 확대+페이드 인, 홈은 뒤로 물러남
+                (fadeIn(tween(240)) + scaleIn(initialScale = 0.90f, animationSpec = tween(240)))
+                    .togetherWith(fadeOut(tween(180)) + scaleOut(targetScale = 1.08f, animationSpec = tween(180)))
+            } else {
+                // 닫을 때: 홈이 앞으로 돌아오고, 문서는 뒤로 멀어지며 사라짐
+                (fadeIn(tween(220)) + scaleIn(initialScale = 1.08f, animationSpec = tween(220)))
+                    .togetherWith(fadeOut(tween(180)) + scaleOut(targetScale = 0.90f, animationSpec = tween(180)))
+            }
+        },
+        label = "screen",
+    ) { target ->
+        if (target == null) {
+            HomeScreen(vm = vm, onOpen = onOpen, onRequestStorage = onRequestStorage)
+        } else {
+            DocumentScreen(
+                vm = vm, ref = target, onOpen = onOpen, onSaveAs = onSaveAs,
+                onExportPdf = onExportPdf, onBack = { vm.close() },
+            )
+        }
     }
 }
 
@@ -218,25 +244,40 @@ private fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
-                    Box(
-                        Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(Brush.linearGradient(listOf(Color(0xFF4F6EF2), Color(0xFF2F4FD0)))),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Filled.Description, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(Color(0xFF4F6EF2), Color(0xFF6A4FE4), Color(0xFF8A4FE0))
+                            )
+                        )
+                        .padding(20.dp),
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White.copy(alpha = 0.22f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(Icons.Filled.Description, contentDescription = null, tint = Color.White, modifier = Modifier.size(21.dp))
+                            }
+                            Spacer(Modifier.width(11.dp))
+                            Text("Paper", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "광고 없는 문서 뷰어 · 에디터\n모든 처리는 기기 안에서만 이루어집니다",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White.copy(alpha = 0.9f),
+                        )
                     }
-                    Spacer(Modifier.width(10.dp))
-                    Text("Paper", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
                 }
-                Text(
-                    "광고 없는 문서 뷰어 · 에디터 — 모든 처리는 기기 안에서만",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 2.dp, bottom = 8.dp),
-                )
             }
 
             if (!vm.hasStorageAccess) {
@@ -275,6 +316,7 @@ private fun HomeScreen(
                             meta = listOf(fmtDate(entry.lastModified), fmtSize(entry.size))
                                 .filter { it.isNotEmpty() }.joinToString("  ·  "),
                             onClick = { vm.openDeviceFile(entry) },
+                            modifier = Modifier.animateItem(),
                         )
                     }
                 }
@@ -292,6 +334,7 @@ private fun HomeScreen(
                         name = ref.name,
                         meta = "",
                         onClick = { vm.openRef(ref) },
+                        modifier = Modifier.animateItem(),
                     )
                 }
             }
@@ -301,11 +344,16 @@ private fun HomeScreen(
 
 @Composable
 private fun AccessCard(onRequestStorage: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, label = "press")
     Surface(
         onClick = onRequestStorage,
+        interactionSource = interaction,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
-        modifier = Modifier.fillMaxWidth(),
+        shadowElevation = 4.dp,
+        modifier = Modifier.fillMaxWidth().graphicsLayer { scaleX = scale; scaleY = scale },
     ) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -354,14 +402,19 @@ private fun FilterRow(selected: HFilter, onSelect: (HFilter) -> Unit) {
 }
 
 @Composable
-private fun FileRow(kind: DocKind, name: String, meta: String, onClick: () -> Unit) {
+private fun FileRow(kind: DocKind, name: String, meta: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val style = styleFor(kind)
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.97f else 1f, label = "press")
     Surface(
         onClick = onClick,
+        interactionSource = interaction,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 3.dp,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().graphicsLayer { scaleX = scale; scaleY = scale },
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             FileIconTile(kind)
@@ -510,7 +563,7 @@ private fun PdfEditorView(vm: AppViewModel, ref: DocRef) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(visiblePages, key = { it.src }) { pe ->
-                PdfEditablePage(repo, pe, model, renderWidth, canDelete = model.activeCount > 1)
+                PdfEditablePage(repo, pe, model, renderWidth, canDelete = model.activeCount > 1, modifier = Modifier.animateItem())
             }
         }
         LazyLeftScrollbar(listState)
@@ -524,13 +577,14 @@ private fun PdfEditablePage(
     model: PdfEditModel,
     renderWidth: Int,
     canDelete: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val aspect = remember(pe.src) { runCatching { repo.aspectRatio(pe.src) }.getOrDefault(1.4f) }
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, pe.src, renderWidth) {
         value = withContext(Dispatchers.IO) { runCatching { repo.render(pe.src, renderWidth) }.getOrNull() }
     }
     Box(
-        Modifier
+        modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(2.dp)),
         contentAlignment = Alignment.Center,
