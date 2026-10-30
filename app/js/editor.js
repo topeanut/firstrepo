@@ -1,5 +1,5 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { penPath, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
+import { penSvg, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
 import { renderRegion } from "./pdf.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
@@ -53,6 +53,7 @@ export class Editor {
     this.eraserSize = prefs.get("eraserSize", 1);
     this.sidebarOpen = prefs.get("sidebar", window.innerWidth >= 700);
     this.pencilOnly = prefs.get("pencilOnly", true);
+    this.pencilDoubleTap = prefs.get("pencilDoubleTap", true);
     this.zoom = 1;
     this.undoStack = [];
     this.redoStack = [];
@@ -114,6 +115,7 @@ export class Editor {
       </header>
       <div class="menu hidden" role="menu">
         <button data-act="pencil"></button>
+        <button data-act="pen-dtap"></button>
         <button data-act="split-menu"></button>
         <button data-act="theme"></button>
         <button data-act="dark-pdf"></button>
@@ -262,6 +264,7 @@ export class Editor {
         .map((i) => `<button class="size${i === curSize ? " on" : ""}" data-size="${i}" aria-label="굵기 ${i + 1}"><i style="--s:${4 + i * 4}px"></i></button>`)
         .join("");
     }
+    $('[data-act="pen-dtap"]').textContent = (this.pencilDoubleTap ? "✓ " : "") + "펜슬 끝 두 번 톡톡 → 지우개 전환";
     $('[data-act="pencil"]').textContent = this.pencilOnly ? "✓ Apple Pencil로만 쓰기 (손가락은 스크롤)" : "Apple Pencil로만 쓰기 (꺼짐: 손가락으로도 필기)";
     this.scroller?.classList.toggle("finger-draw", !this.pencilOnly);
     $('[data-act="theme"]').textContent = `테마: ${THEME_LABEL[getTheme()]}`;
@@ -365,6 +368,11 @@ export class Editor {
           this.removeItem(it);
           this.pushUndo({ type: "item-del", item: it });
         }
+        break;
+      case "pen-dtap":
+        this.pencilDoubleTap = !this.pencilDoubleTap;
+        prefs.set("pencilDoubleTap", this.pencilDoubleTap);
+        this.renderToolbar();
         break;
       case "pencil":
         this.pencilOnly = !this.pencilOnly;
@@ -831,19 +839,22 @@ export class Editor {
     return isDark() && (pv.page.bg.type !== "pdf" || darkPdf());
   }
 
+  // Highlighter: one stroked <path>. Pen: a <g> holding one round-nib path per pressure run.
   makePath(pv, s) {
-    const path = document.createElementNS(SVGNS, "path");
     const color = this.pageDark(pv) ? darkInk(s.color) : s.color;
+    const el = document.createElementNS(SVGNS, s.tool === "hl" ? "path" : "g");
+    el.setAttribute("stroke", color);
     if (s.tool === "hl") {
-      path.setAttribute("d", hlPath(s));
-      path.setAttribute("stroke", color);
-      path.setAttribute("stroke-width", s.width);
-      path.setAttribute("opacity", HL_ALPHA);
-    } else {
-      path.setAttribute("d", penPath(s));
-      path.setAttribute("fill", color);
+      el.setAttribute("stroke-width", s.width);
+      el.setAttribute("opacity", HL_ALPHA);
     }
-    return path;
+    this.setInk(el, s);
+    return el;
+  }
+
+  setInk(el, s) {
+    if (s.tool === "hl") el.setAttribute("d", hlPath(s));
+    else el.innerHTML = penSvg(s);
   }
 
   addPath(pv, s) {
@@ -1362,7 +1373,7 @@ export class Editor {
       const a = this.active;
       if (!a?.stroke || !a.livePath) return;
       const s = a.stroke;
-      a.livePath.setAttribute("d", s.tool === "hl" ? hlPath(s) : penPath(s));
+      this.setInk(a.livePath, s);
     });
   }
 
@@ -1447,6 +1458,9 @@ export class Editor {
     const a = this.active;
     if (!a || a.id !== e.pointerId) return;
     if (Math.hypot(e.clientX - a.x0, e.clientY - a.y0) > 8) a.moved = true;
+    a.travel = (a.travel || 0) + Math.hypot(e.clientX - (a.lx ?? a.x0), e.clientY - (a.ly ?? a.y0));
+    a.lx = e.clientX;
+    a.ly = e.clientY;
     if (a.item) {
       e.preventDefault();
       if (a.moved) this.onItemMove(e);
@@ -1502,14 +1516,18 @@ export class Editor {
     if (a.stroke && a.stroke.pts.length) {
       const s = a.stroke;
       // The live path becomes the stroke's path: nothing is redrawn.
-      a.livePath.setAttribute("d", s.tool === "hl" ? hlPath(s) : penPath(s));
+      this.setInk(a.livePath, s);
       a.pv.paths.set(s, a.livePath);
       this.addStrokes([s], false);
       this.staleThumb(s.page);
       this.dirty();
       this.pushUndo({ type: "add", strokes: [s] });
     }
-    if (quickTap && a.pen && (a.stroke || a.erase)) this.onPencilTap(e, a);
+    // Only a genuine tap counts (under 3px of travel, under 0.2s), so short handwriting strokes —
+    // dots, ㅇ, small ticks — written in quick succession are never mistaken for it.
+    const tap = !a.moved && (a.travel || 0) < 3 && performance.now() - a.t0 < 200;
+    if (tap && a.pen && (a.stroke || a.erase) && this.pencilDoubleTap) this.onPencilTap(e, a);
+    else this._penTap = null;
   }
 
   // Apple Pencil's barrel double-tap is not delivered to web apps, so a quick double tap of the
@@ -1519,7 +1537,7 @@ export class Editor {
     const ops = this.undoStack.slice(a.undoLen);
     const now = performance.now();
     const prev = this._penTap;
-    if (prev && now - prev.t < 350 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 10) {
+    if (prev && now - prev.t < 300 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 8) {
       this._penTap = null;
       for (const op of [...prev.ops, ...ops].reverse()) {
         const i = this.undoStack.lastIndexOf(op);

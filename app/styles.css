@@ -536,8 +536,9 @@ body, .toolbar, .lib-side, .lib-head, .sidebar, .scroller { transition: backgrou
 /* Vector ink */
 .page svg.ink { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; display: block; }
 .page svg.ink path { shape-rendering: geometricPrecision; }
+.page svg.ink .pen path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .page svg.ink .hl path { fill: none; stroke-linecap: butt; stroke-linejoin: round; }
-.page svg.ink .pen path.faded { fill: #9aa3ad; opacity: 0.45; }
+.page svg.ink .pen .faded { stroke: #9aa3ad; opacity: 0.45; }
 .page svg.ink .hl path.faded { stroke: #9aa3ad; opacity: 0.15; }
 .page svg.ink .eraser-cursor { fill: rgba(120, 120, 120, 0.12); stroke: rgba(90, 90, 90, 0.7); stroke-width: 1.2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .page.flash { animation: flash 0.7s var(--ease); }
