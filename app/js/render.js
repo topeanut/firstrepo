@@ -38,11 +38,12 @@ export function drawPaper(ctx, bg, w, h, scale, dark = false) {
 }
 
 // `dark` only affects generated paper; PDFs are darkened with a CSS filter on screen.
-export async function drawBackground(canvas, page, dark = false) {
+// `keep`: an on-screen page (see renderPage).
+export async function drawBackground(canvas, page, dark = false, keep = false) {
   const ctx = canvas.getContext("2d");
   if (page.bg.type === "pdf") {
     try {
-      await renderPage(page.bg.pdf, page.bg.page, canvas);
+      await renderPage(page.bg.pdf, page.bg.page, canvas, keep);
       return;
     } catch (e) {
       console.warn("PDF render failed", e);
@@ -69,6 +70,15 @@ export async function makeThumb(doc) {
   const url = c.toDataURL("image/jpeg", 0.75);
   c.width = c.height = 0;
   return url;
+}
+
+// JPEG bytes of a canvas. Encoded synchronously: Chrome runs toBlob/convertToBlob only when the
+// page is idle, which sometimes held each page of an export for seconds.
+function jpeg(canvas, quality) {
+  const bin = atob(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 // Minimal PDF writer: one JPEG image per page.
@@ -99,8 +109,7 @@ export async function exportPdf(doc, onProgress) {
     const W = 612, H = (612 * page.h) / page.w;
     // ~150 dpi across a letter-width page: sharp in print, quick on iPad.
     const c = await pageImage(doc, page, 1280);
-    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.86));
-    const jpg = new Uint8Array(await blob.arrayBuffer());
+    const jpg = jpeg(c, 0.86);
     const [pid, cid, iid] = [3 + i * 3, 4 + i * 3, 5 + i * 3];
     obj(pid, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H.toFixed(2)}] /Resources << /XObject << /Im0 ${iid} 0 R >> >> /Contents ${cid} 0 R >>`);
     const content = `q ${W} 0 0 ${H.toFixed(2)} 0 0 cm /Im0 Do Q`;
