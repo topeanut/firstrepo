@@ -10,15 +10,28 @@ android {
 
     defaultConfig {
         applicationId = "com.paper.office"
-        minSdk = 26
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        // 디버그 키로 서명하되 v1(JAR)+v2 를 모두 활성화해
+        // 사이드로드 시 'v1 서명 필요' 기기에서도 설치되도록 한다.
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
