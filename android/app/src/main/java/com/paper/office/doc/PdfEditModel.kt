@@ -19,6 +19,7 @@ class PdfStroke(val tool: PdfTool, val color: Int, val width: Float) {
 
 class PdfPageEdit(val src: Int) {
     var deleted by mutableStateOf(false)
+    var rotation by mutableIntStateOf(0) // 0 / 90 / 180 / 270 (시계방향)
     val strokes: SnapshotStateList<PdfStroke> = mutableStateListOf()
 }
 
@@ -38,6 +39,11 @@ class PdfEditModel(pageCount: Int) {
 
     fun deletePage(p: PdfPageEdit) {
         if (activeCount > 1) { p.deleted = true; dirty = true }
+    }
+
+    fun rotatePage(p: PdfPageEdit) {
+        p.rotation = (p.rotation + 90) % 360
+        dirty = true
     }
 
     fun undo() {

@@ -53,13 +53,24 @@ object PdfExporter {
                     annBmp.recycle()
                 }
 
-                // 3) PDF 페이지(포인트 단위) 에 합성 비트맵을 채워 그린다
-                val info = PdfDocument.PageInfo.Builder(wPts, hPts, pageNo).create()
+                // 2.5) 사용자 회전 반영: 합성 비트맵을 통째로 회전
+                var finalBmp = pageBmp
+                if (pe.rotation % 360 != 0) {
+                    val m = android.graphics.Matrix().apply { postRotate(pe.rotation.toFloat()) }
+                    val rotated = Bitmap.createBitmap(pageBmp, 0, 0, pageBmp.width, pageBmp.height, m, true)
+                    if (rotated != pageBmp) pageBmp.recycle()
+                    finalBmp = rotated
+                }
+
+                // 3) PDF 페이지(포인트 단위) 에 합성 비트맵을 채워 그린다. 회전 시 가로/세로가 바뀐다.
+                val outWPts = finalBmp.width / SCALE
+                val outHPts = finalBmp.height / SCALE
+                val info = PdfDocument.PageInfo.Builder(outWPts, outHPts, pageNo).create()
                 val pdfPage = doc.startPage(info)
-                val dst = android.graphics.Rect(0, 0, wPts, hPts)
-                pdfPage.canvas.drawBitmap(pageBmp, null, dst, null)
+                val dst = android.graphics.Rect(0, 0, outWPts, outHPts)
+                pdfPage.canvas.drawBitmap(finalBmp, null, dst, null)
                 doc.finishPage(pdfPage)
-                pageBmp.recycle()
+                finalBmp.recycle()
                 pageNo++
             }
             context.contentResolver.openOutputStream(outUri, "wt")?.use { doc.writeTo(it) } ?: return false

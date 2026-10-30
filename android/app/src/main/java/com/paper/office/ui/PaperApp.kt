@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Slideshow
 import androidx.compose.material.icons.filled.TableChart
@@ -90,6 +91,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -583,41 +585,65 @@ private fun PdfEditablePage(
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, pe.src, renderWidth) {
         value = withContext(Dispatchers.IO) { runCatching { repo.render(pe.src, renderWidth) }.getOrNull() }
     }
-    Box(
-        modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(2.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         val bmp = bitmap
         if (bmp != null) {
-            Box(Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat() / bmp.height.toFloat())) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = "페이지 ${pe.src + 1}",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.FillWidth,
-                )
-                AnnotationCanvas(pe, model, Modifier.matchParentSize())
-            }
-        } else {
-            Box(Modifier.fillMaxWidth().aspectRatio(1f / aspect), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        }
-        if (canDelete) {
-            IconButton(
-                onClick = { model.deletePage(pe) },
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
+            val rot = ((pe.rotation % 360) + 360) % 360
+            val swap = rot == 90 || rot == 270
+            val finalAspect =
+                if (swap) bmp.height.toFloat() / bmp.width.toFloat()
+                else bmp.width.toFloat() / bmp.height.toFloat()
+            androidx.compose.foundation.layout.BoxWithConstraints(
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(finalAspect)
+                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(2.dp)),
             ) {
+                val fw = maxWidth
+                val fh = maxHeight
                 Box(
-                    Modifier.clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(5.dp),
-                    contentAlignment = Alignment.Center,
+                    Modifier
+                        .size(width = if (swap) fh else fw, height = if (swap) fw else fh)
+                        .align(Alignment.Center)
+                        .rotate(rot.toFloat()),
                 ) {
-                    Icon(Icons.Filled.Delete, contentDescription = "페이지 삭제", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "페이지 ${pe.src + 1}",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.FillBounds,
+                    )
+                    AnnotationCanvas(pe, model, Modifier.matchParentSize())
                 }
             }
+        } else {
+            Box(
+                Modifier.fillMaxWidth().aspectRatio(1f / aspect)
+                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(2.dp)),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator() }
         }
+        Row(
+            Modifier.align(Alignment.TopEnd).padding(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            PageActionButton(Icons.Filled.RotateRight, "회전") { model.rotatePage(pe) }
+            if (canDelete) PageActionButton(Icons.Filled.Delete, "페이지 삭제") { model.deletePage(pe) }
+        }
+    }
+}
+
+@Composable
+private fun PageActionButton(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = desc, tint = Color.White, modifier = Modifier.size(17.dp))
     }
 }
 
