@@ -47,8 +47,15 @@ object DocTypes {
         val ext = name.substringAfterLast('.', "").lowercase()
         byExtension(ext)?.let { return it }
         // 확장자가 없으면 MIME 으로 추정
-        val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null } ?: ""
-        return byMime(mime)
+        val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
+        return byMime(mime ?: "")
+    }
+
+    /** uri 없이 이름 + MIME 만으로 종류 판별(폴더 목록 조회용). */
+    fun kindOf(name: String, mime: String?): DocKind {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        byExtension(ext)?.let { return it }
+        return byMime(mime ?: "")
     }
 
     private fun byExtension(ext: String): DocKind? = when (ext) {

@@ -15,12 +15,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.paper.office.doc.DeviceFiles
 import com.paper.office.doc.DocKind
 import com.paper.office.doc.DocRef
 import com.paper.office.doc.DocTypes
 import com.paper.office.doc.TextIO
 import com.paper.office.ui.PaperApp
 import com.paper.office.ui.theme.PaperTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
@@ -36,6 +41,11 @@ class MainActivity : ComponentActivity() {
             uri?.let { vm.saveTextTo(it) }
         }
 
+    private val openTree =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let { onFolderPicked(it) }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         intent?.data?.let { persistAndOpen(it) }
@@ -45,9 +55,18 @@ class MainActivity : ComponentActivity() {
                     vm = vm,
                     onOpen = { openDoc.launch(arrayOf("*/*")) },
                     onSaveAs = { suggestedName -> createDoc.launch(suggestedName) },
+                    onPickFolder = { openTree.launch(null) },
                 )
             }
         }
+    }
+
+    private fun onFolderPicked(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) {
+        }
+        vm.setFolder(uri)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -71,12 +90,60 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val recents: SnapshotStateList<DocRef> = emptyList<DocRef>().toMutableStateList()
 
+    // 연결된 폴더(다운로드 등)
+    var folderUri by mutableStateOf<Uri?>(null)
+        private set
+    var folderName by mutableStateOf("")
+        private set
+    var folderLoading by mutableStateOf(false)
+        private set
+    val folderFiles: SnapshotStateList<DeviceFiles.Entry> = emptyList<DeviceFiles.Entry>().toMutableStateList()
+
     // 텍스트 편집 상태 (Save As 시 액티비티에서 접근)
     var editorText by mutableStateOf("")
     private var editorLoadedFor: Uri? = null
 
     init {
         loadRecents()
+        restoreFolder()
+    }
+
+    fun setFolder(uri: Uri) {
+        folderUri = uri
+        prefs().edit().putString("folder", uri.toString()).apply()
+        loadFolder()
+    }
+
+    private fun restoreFolder() {
+        val saved = prefs().getString("folder", null) ?: return
+        val uri = Uri.parse(saved)
+        // 권한이 아직 유효한 경우에만 사용
+        val ok = getApplication<Application>().contentResolver.persistedUriPermissions.any {
+            it.uri == uri && it.isReadPermission
+        }
+        if (ok) {
+            folderUri = uri
+            loadFolder()
+        }
+    }
+
+    fun loadFolder() {
+        val uri = folderUri ?: return
+        folderLoading = true
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { DeviceFiles.treeName(getApplication(), uri) }
+            val list = withContext(Dispatchers.IO) { DeviceFiles.list(getApplication(), uri) }
+            folderName = name
+            folderFiles.clear()
+            folderFiles.addAll(list)
+            folderLoading = false
+        }
+    }
+
+    fun openDeviceFile(entry: DeviceFiles.Entry) {
+        current = DocRef(entry.uri, entry.name, entry.kind)
+        editorLoadedFor = null
+        addRecent(current!!)
     }
 
     fun open(uri: Uri) {
