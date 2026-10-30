@@ -17,10 +17,10 @@ const write = (k, v) => {
   } catch {}
 };
 
-export const THEMES = ["system", "light", "dark"];
+export const THEMES = ["light", "dark", "system"];
 export const THEME_LABEL = { system: "시스템 설정", light: "라이트", dark: "다크" };
 
-export const getTheme = () => read(KEY, "system");
+export const getTheme = () => read(KEY, "light");
 export const isDark = () => (getTheme() === "system" ? mq.matches : getTheme() === "dark");
 export const darkPdf = () => read(DARK_PDF_KEY, "0") === "1";
 

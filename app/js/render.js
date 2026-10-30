@@ -1,6 +1,7 @@
 // Page backgrounds, offscreen page rendering, thumbnails and PDF export.
 import { renderPage } from "./pdf.js";
 import { drawStrokes } from "./ink.js";
+import { drawItems } from "./items.js";
 
 const PAPER = {
   light: { paper: "#fff", lined: "#cfe0f1", grid: "#e3e8ee" },
@@ -56,6 +57,7 @@ export async function pageImage(doc, page, width) {
   c.width = Math.round(width);
   c.height = Math.round((width * page.h) / page.w);
   await drawBackground(c, page);
+  await drawItems(c.getContext("2d"), (doc.items || []).filter((i) => i.page === page.id), c.width / page.w);
   const ink = doc.strokes.filter((s) => s.page === page.id);
   drawStrokes(c.getContext("2d"), ink, c.width / page.w);
   return c;

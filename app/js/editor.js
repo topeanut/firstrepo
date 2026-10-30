@@ -2,9 +2,10 @@
 import { drawStroke, drawStrokes, hitStroke, bbox } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb } from "./render.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
-import { putDoc, putNote, uid } from "./db.js";
+import { getBlob, putDoc, putNote, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
 import { icon } from "./icons.js";
+import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem } from "./items.js";
 import { isDark, darkPdf, darkInk, cycleTheme, toggleDarkPdf, getTheme, THEME_LABEL, onThemeChange } from "./theme.js";
 
 const COLORS = ["#1c1c1e", "#0a63d8", "#d93025", "#1e8e3e", "#f29900"];
@@ -44,7 +45,10 @@ export class Editor {
     this.zoom = 1;
     this.undoStack = [];
     this.redoStack = [];
+    doc.items ||= [];
     this.byPage = new Map(doc.pages.map((p) => [p.id, []]));
+    this.urls = new Map();
+    this.selected = null;
     for (const s of doc.strokes) this.byPage.get(s.page)?.push(s);
     this.recorder = new Recorder();
     this.player = new Player();
@@ -67,11 +71,13 @@ export class Editor {
           <button class="icon-btn tool" data-tool="pen" title="펜">${icon("pen")}</button>
           <button class="icon-btn tool" data-tool="hl" title="형광펜">${icon("hl")}</button>
           <button class="icon-btn tool" data-tool="eraser" title="지우개">${icon("eraser")}</button>
+          <button class="icon-btn tool" data-tool="select" title="선택·이동 (첨부 옮기기)">${icon("select")}</button>
           <span class="sep"></span>
           <span class="swatches"></span>
           <span class="sizes"></span>
         </div>
         <div class="tb-group">
+          <button class="icon-btn" data-act="add" title="추가 (사진, PDF, 파일, 페이지)">${icon("plus")}</button>
           <button class="icon-btn" data-act="undo" title="실행 취소">${icon("undo")}</button>
           <button class="icon-btn" data-act="redo" title="다시 실행">${icon("redo")}</button>
           <button class="icon-btn" data-act="record" title="녹음">${icon("mic")}<span class="rec-time"></span></button>
@@ -83,13 +89,22 @@ export class Editor {
         <button data-act="pencil"></button>
         <button data-act="theme"></button>
         <button data-act="dark-pdf"></button>
-        <button data-act="add-lined">줄 페이지 추가</button>
-        <button data-act="add-grid">모눈 페이지 추가</button>
-        <button data-act="add-blank">무지 페이지 추가</button>
         <button data-act="zoom-in">확대</button>
         <button data-act="zoom-out">축소</button>
         <button data-act="export">PDF로 내보내기</button>
       </div>
+      <div class="menu addmenu hidden" role="menu">
+        <button data-act="pick-image">${icon("image")}<span>사진 / 이미지</span></button>
+        <button data-act="pick-pdf">${icon("doc")}<span>PDF 페이지 삽입</span></button>
+        <button data-act="pick-file">${icon("clip")}<span>파일 첨부</span></button>
+        <span class="menu-sep"></span>
+        <button data-act="add-lined">${icon("lined")}<span>줄 페이지 추가</span></button>
+        <button data-act="add-grid">${icon("grid")}<span>모눈 페이지 추가</span></button>
+        <button data-act="add-blank">${icon("blank")}<span>무지 페이지 추가</span></button>
+      </div>
+      <input type="file" class="pick pick-image" accept="image/*" multiple hidden />
+      <input type="file" class="pick pick-pdf" accept="application/pdf,.pdf" multiple hidden />
+      <input type="file" class="pick pick-file" multiple hidden />
       <div class="scroller"><div class="pages"></div></div>
       <div class="playerbar hidden">
         <select class="rec-select" aria-label="녹음 선택"></select>
@@ -124,8 +139,17 @@ export class Editor {
       else if (b.dataset.act) this.action(b.dataset.act, b);
     });
     document.addEventListener("pointerdown", (this._menuCloser = (e) => {
-      if (!e.target.closest(".menu") && !e.target.closest('[data-act="more"]')) $(".menu").classList.add("hidden");
+      if (e.target.closest(".menu") || e.target.closest('[data-act="more"],[data-act="add"]')) return;
+      this.root.querySelectorAll(".menu").forEach((m) => m.classList.add("hidden"));
     }));
+    for (const kind of ["image", "pdf", "file"]) {
+      const input = $(".pick-" + kind);
+      input.addEventListener("change", () => {
+        const files = [...input.files];
+        input.value = "";
+        if (files.length) this.insertFiles(kind, files);
+      });
+    }
     this.renderToolbar();
 
     this.pageViews = this.doc.pages.map((p) => this.makePageView(p));
@@ -159,7 +183,9 @@ export class Editor {
     this.root.querySelectorAll(".tool").forEach((b) => b.classList.toggle("on", b.dataset.tool === this.tool));
     const sw = $(".swatches");
     const sz = $(".sizes");
-    if (this.tool === "eraser") {
+    this.scroller?.classList.toggle("select-mode", this.tool === "select");
+    if (this.tool !== "select") this.select(null);
+    if (this.tool === "eraser" || this.tool === "select") {
       sw.innerHTML = sz.innerHTML = "";
     } else {
       const hl = this.tool === "hl";
@@ -195,7 +221,8 @@ export class Editor {
   }
 
   async action(act, btn) {
-    const menu = this.$(".menu");
+    const menu = this.$(".menu:not(.addmenu)");
+    const addMenu = this.$(".addmenu");
     switch (act) {
       case "back":
         await this.close();
@@ -208,7 +235,28 @@ export class Editor {
         this.redo();
         break;
       case "more":
+        addMenu.classList.add("hidden");
         menu.classList.toggle("hidden");
+        break;
+      case "add":
+        menu.classList.add("hidden");
+        addMenu.classList.toggle("hidden");
+        break;
+      case "pick-image":
+      case "pick-pdf":
+      case "pick-file":
+        addMenu.classList.add("hidden");
+        this.$("." + act).click();
+        break;
+      case "item-open":
+        if (this.selected) openItem(this.selected).catch((err) => this.toast(err.message || String(err)));
+        break;
+      case "item-delete":
+        if (this.selected) {
+          const it = this.selected;
+          this.removeItem(it);
+          this.pushUndo({ type: "item-del", item: it });
+        }
         break;
       case "pencil":
         this.pencilOnly = !this.pencilOnly;
@@ -218,7 +266,7 @@ export class Editor {
       case "add-lined":
       case "add-grid":
       case "add-blank":
-        menu.classList.add("hidden");
+        addMenu.classList.add("hidden");
         this.addPage(act.slice(4));
         break;
       case "theme":
@@ -282,11 +330,19 @@ export class Editor {
     const ink = document.createElement("canvas");
     bg.className = "bg";
     ink.className = "ink";
-    el.append(bg, ink);
-    const pv = { page, el, bg, ink, rendered: false, pr: 1 };
+    const items = document.createElement("div");
+    items.className = "items";
+    el.append(bg, items, ink);
+    const pv = { page, el, bg, ink, items, rendered: false, pr: 1 };
     el._pv = pv;
+    for (const it of this.doc.items) if (it.page === page.id) items.append(itemElement(it, page, this.urlFor));
     return pv;
   }
+
+  urlFor = (key) => {
+    if (!this.urls.has(key)) this.urls.set(key, getBlob(key).then((b) => (b ? URL.createObjectURL(b) : "")));
+    return this.urls.get(key);
+  };
 
   baseWidth() {
     return Math.min(this.scroller.clientWidth - 24, 1100);
@@ -422,18 +478,174 @@ export class Editor {
     if (this.undoStack.length > 200) this.undoStack.shift();
     this.redoStack = [];
   }
+  applyOp(op, reverse) {
+    switch (op.type) {
+      case "add":
+      case "remove":
+        (op.type === "add") !== reverse ? this.addStrokes(op.strokes) : this.removeStrokes(op.strokes);
+        break;
+      case "item-add":
+      case "item-del":
+        (op.type === "item-add") !== reverse ? this.addItem(op.item) : this.removeItem(op.item);
+        break;
+      case "item-move":
+        Object.assign(op.item, reverse ? op.from : op.to);
+        this.refreshItem(op.item);
+        this.dirty();
+        break;
+    }
+  }
   undo() {
     const op = this.undoStack.pop();
     if (!op) return;
-    op.type === "add" ? this.removeStrokes(op.strokes) : this.addStrokes(op.strokes);
+    this.applyOp(op, true);
     this.redoStack.push(op);
   }
   redo() {
     const op = this.redoStack.pop();
     if (!op) return;
-    op.type === "add" ? this.addStrokes(op.strokes) : this.removeStrokes(op.strokes);
+    this.applyOp(op, false);
     this.undoStack.push(op);
   }
+
+  // ---------- attachments ----------
+  itemEl(item) {
+    return this.pvOf(item.page)?.items.querySelector(`[data-id="${item.id}"]`);
+  }
+  addItem(item) {
+    if (!this.doc.items.includes(item)) this.doc.items.push(item);
+    const pv = this.pvOf(item.page);
+    pv?.items.append(itemElement(item, pv.page, this.urlFor));
+    this.dirty();
+  }
+  removeItem(item) {
+    if (this.selected === item) this.select(null);
+    this.doc.items = this.doc.items.filter((i) => i !== item);
+    this.itemEl(item)?.remove();
+    this.dirty();
+  }
+  refreshItem(item) {
+    const el = this.itemEl(item);
+    if (el) positionItem(el, item, this.pvOf(item.page).page);
+  }
+  select(item) {
+    this.selected = item;
+    this.root.querySelectorAll(".item.selected").forEach((e) => e.classList.remove("selected"));
+    if (item) this.itemEl(item)?.classList.add("selected");
+  }
+
+  // The page nearest the middle of the screen, and the visible centre point on it.
+  currentPage() {
+    const sc = this.scroller;
+    const mid = sc.scrollTop + sc.clientHeight / 2;
+    let best = this.pageViews[0], bestD = Infinity;
+    for (const pv of this.pageViews) {
+      const t = pv.el.offsetTop, b = t + pv.cssH;
+      const d = mid < t ? t - mid : mid > b ? mid - b : 0;
+      if (d < bestD) (bestD = d), (best = pv);
+    }
+    const top = Math.max(best.el.offsetTop, sc.scrollTop);
+    const bottom = Math.min(best.el.offsetTop + best.cssH, sc.scrollTop + sc.clientHeight);
+    const cy = (((top + bottom) / 2 - best.el.offsetTop) / best.cssH) * best.page.h;
+    return { pv: best, center: [best.page.w / 2, Math.min(Math.max(cy, 80), best.page.h - 80)] };
+  }
+
+  async insertFiles(kind, files) {
+    if (!this.pageViews.length) this.addPage("lined");
+    const { pv, center } = this.currentPage();
+    let added = 0;
+    for (const [i, f] of files.entries()) {
+      try {
+        this.toast(`추가하는 중… ${i + 1}/${files.length}`, 0);
+        const isPdf = /\.pdf$/i.test(f.name) || f.type === "application/pdf";
+        if (kind === "pdf" || (kind === "file" && isPdf && files.length === 1 && confirm(`"${f.name}"을(를) 필기할 수 있는 페이지로 넣을까요?\n취소를 누르면 파일로 첨부돼요.`))) {
+          await this.insertPdfPages(f, pv);
+        } else {
+          const c = [center[0] + i * 24, center[1] + i * 24];
+          const isImage = kind === "image" || (/^image\//.test(f.type) && kind !== "file");
+          const item = isImage ? await makeImageItem(f, pv.page, c) : await makeFileItem(f, pv.page, c);
+          this.addItem(item);
+          this.pushUndo({ type: "item-add", item });
+          if (kind !== "image" && !isImage) this.setTool("select");
+          this.select(this.tool === "select" ? item : null);
+        }
+        added++;
+      } catch (err) {
+        console.error(err);
+        this.toast(`${f.name} 추가 실패: ${err.message || err}`, 4000);
+        return;
+      }
+    }
+    this.toast(kind === "pdf" ? "PDF 페이지를 넣었어요." : `${added}개 첨부했어요. 선택 도구(화살표)로 옮기거나 크기를 바꿀 수 있어요.`);
+  }
+
+  async insertPdfPages(file, afterPv) {
+    const { pdfPages } = await import("./import.js");
+    const pages = await pdfPages(file);
+    const at = this.pageViews.indexOf(afterPv) + 1;
+    this.doc.pages.splice(at, 0, ...pages);
+    const views = pages.map((p) => {
+      this.byPage.set(p.id, []);
+      return this.makePageView(p);
+    });
+    this.pageViews.splice(at, 0, ...views);
+    const ref = this.pageViews[at + views.length]?.el || null;
+    views.forEach((v) => this.pagesEl.insertBefore(v.el, ref));
+    this.layout();
+    this.scroller.scrollTo({ top: views[0].el.offsetTop - 12, behavior: "smooth" });
+    this.dirty();
+  }
+
+  // Select tool: drag items to move, drag the corner handle to resize.
+  onItemDown(e, pv) {
+    const el = e.target.closest(".item");
+    if (e.target.closest(".item-bar")) return true; // buttons handle themselves
+    if (!el) {
+      this.select(null);
+      return false;
+    }
+    const item = this.doc.items.find((i) => i.id === el.dataset.id);
+    if (!item) return false;
+    e.preventDefault();
+    this.select(item);
+    try {
+      pv.el.setPointerCapture?.(e.pointerId);
+    } catch {}
+    this.active = {
+      id: e.pointerId, pv, t0: performance.now(), x0: e.clientX, y0: e.clientY, moved: false,
+      item, mode: e.target.dataset.handle === "resize" ? "resize" : "move",
+      start: this.pagePoint(pv, e), from: { x: item.x, y: item.y, w: item.w, h: item.h },
+    };
+    return true;
+  }
+
+  onItemMove(e) {
+    const a = this.active;
+    const [x, y] = this.pagePoint(a.pv, e);
+    const dx = x - a.start[0], dy = y - a.start[1];
+    const it = a.item, f = a.from, page = a.pv.page;
+    if (a.mode === "move") {
+      it.x = Math.min(Math.max(f.x + dx, -f.w * 0.8), page.w - f.w * 0.2);
+      it.y = Math.min(Math.max(f.y + dy, -f.h * 0.8), page.h - f.h * 0.2);
+    } else if (it.type === "image") {
+      const w = Math.max(40, f.w + dx);
+      it.w = w;
+      it.h = (w * f.h) / f.w;
+    } else {
+      it.w = Math.max(160, f.w + dx);
+    }
+    this.refreshItem(it);
+  }
+
+  onItemUp(a) {
+    const it = a.item;
+    const to = { x: it.x, y: it.y, w: it.w, h: it.h };
+    if (a.moved && JSON.stringify(to) !== JSON.stringify(a.from)) {
+      this.pushUndo({ type: "item-move", item: it, from: a.from, to });
+      this.dirty();
+    }
+  }
+
 
   // ---------- input ----------
   bindInput() {
@@ -517,7 +729,11 @@ export class Editor {
     const pageEl = e.target.closest(".page");
     if (!pageEl || this.active) return;
     const pv = pageEl._pv;
-    const draw = this.canDraw(e) && e.button === 0;
+    if (this.tool === "select" && e.button === 0) {
+      if (this.onItemDown(e, pv)) return;
+      if (e.pointerType === "touch") return; // finger on empty space: scroll
+    }
+    const draw = this.canDraw(e) && e.button === 0 && this.tool !== "select";
     this.active = { id: e.pointerId, pv, t0: performance.now(), x0: e.clientX, y0: e.clientY, draw, moved: false };
     if (!draw) return; // finger: maybe a tap on ink while playing back
     e.preventDefault();
@@ -585,6 +801,11 @@ export class Editor {
     const a = this.active;
     if (!a || a.id !== e.pointerId) return;
     if (Math.hypot(e.clientX - a.x0, e.clientY - a.y0) > 8) a.moved = true;
+    if (a.item) {
+      e.preventDefault();
+      if (a.moved) this.onItemMove(e);
+      return;
+    }
     if (!a.draw) return;
     e.preventDefault();
     if (this.tool === "eraser" && a.erased) {
@@ -602,7 +823,23 @@ export class Editor {
     this.active = null;
     this.live.remove();
     const quickTap = !a.moved && performance.now() - a.t0 < 350;
+    if (a.item) {
+      if (cancelled) {
+        Object.assign(a.item, a.from);
+        this.refreshItem(a.item);
+      } else this.onItemUp(a);
+      return;
+    }
     if (!cancelled && quickTap && this.player.recording && this.seekToInk(a.pv, this.pagePoint(a.pv, e))) return;
+    // Finger tap on an attached file opens it.
+    if (!cancelled && quickTap && !a.draw) {
+      const [x, y] = this.pagePoint(a.pv, e);
+      const it = this.doc.items.findLast?.((i) => i.page === a.pv.page.id && i.type === "file" && hitItem(i, x, y));
+      if (it) {
+        openItem(it).catch((err) => this.toast(err.message || String(err)));
+        return;
+      }
+    }
     if (cancelled) return;
     if (a.erased?.length) this.pushUndo({ type: "remove", strokes: a.erased });
     if (a.stroke && a.stroke.pts.length) {
@@ -753,5 +990,6 @@ export class Editor {
     document.removeEventListener("visibilitychange", this._visibility);
     this._offTheme();
     this.pageViews.forEach((pv) => this.release(pv));
+    for (const p of this.urls.values()) p.then((u) => u && URL.revokeObjectURL(u));
   }
 }
