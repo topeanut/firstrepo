@@ -33,14 +33,20 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Slideshow
+import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -70,11 +76,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -127,6 +137,35 @@ private fun fmtSize(bytes: Long): String = when {
     else -> String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 }
 
+private data class TypeStyle(val icon: ImageVector, val color: Color, val tag: String)
+
+private fun styleFor(kind: DocKind): TypeStyle = when (kind) {
+    DocKind.PDF -> TypeStyle(Icons.Filled.PictureAsPdf, Color(0xFFE5484D), "PDF")
+    DocKind.DOCX -> TypeStyle(Icons.Filled.Description, Color(0xFF2F6BED), "DOCX")
+    DocKind.XLSX -> TypeStyle(Icons.Filled.TableChart, Color(0xFF13A05F), "XLSX")
+    DocKind.PPTX -> TypeStyle(Icons.Filled.Slideshow, Color(0xFFE8833A), "PPT")
+    DocKind.TEXT -> TypeStyle(Icons.AutoMirrored.Filled.TextSnippet, Color(0xFF7A7F87), "TXT")
+    DocKind.CSV -> TypeStyle(Icons.Filled.TableChart, Color(0xFF13A05F), "CSV")
+    DocKind.MARKDOWN -> TypeStyle(Icons.AutoMirrored.Filled.TextSnippet, Color(0xFF7A7F87), "MD")
+    DocKind.IMAGE -> TypeStyle(Icons.Filled.Photo, Color(0xFF0EA5E9), "IMG")
+    DocKind.HWP -> TypeStyle(Icons.Filled.Description, Color(0xFF8B5CF6), "HWP")
+    DocKind.UNKNOWN -> TypeStyle(Icons.Filled.InsertDriveFile, Color(0xFF8A9099), "FILE")
+}
+
+@Composable
+private fun FileIconTile(kind: DocKind, size: Int = 46) {
+    val s = styleFor(kind)
+    Box(
+        Modifier
+            .size(size.dp)
+            .clip(RoundedCornerShape((size / 3.4f).dp))
+            .background(s.color.copy(alpha = 0.14f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(s.icon, contentDescription = null, tint = s.color, modifier = Modifier.size((size * 0.5f).dp))
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  홈
 // ---------------------------------------------------------------------------
@@ -157,13 +196,25 @@ private fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Text("Paper Office", style = MaterialTheme.typography.headlineMedium)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
+                    Box(
+                        Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(Brush.linearGradient(listOf(Color(0xFF4F6EF2), Color(0xFF2F4FD0)))),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Description, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text("Paper", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
+                }
                 Text(
-                    "광고 없는 문서 뷰어 · 에디터 — 모든 처리는 기기 안에서만.",
+                    "광고 없는 문서 뷰어 · 에디터 — 모든 처리는 기기 안에서만",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 2.dp, bottom = 8.dp),
                 )
-                Spacer(Modifier.height(8.dp))
             }
 
             // 폴더 연결 카드
@@ -189,8 +240,8 @@ private fun HomeScreen(
                     }
                     else -> items(files, key = { it.uri.toString() }) { entry ->
                         FileRow(
+                            kind = entry.kind,
                             name = entry.name,
-                            kindLabel = entry.kind.label,
                             meta = listOf(fmtDate(entry.lastModified), fmtSize(entry.size))
                                 .filter { it.isNotEmpty() }.joinToString("  ·  "),
                             onClick = { vm.openDeviceFile(entry) },
@@ -207,9 +258,9 @@ private fun HomeScreen(
                 }
                 items(vm.recents, key = { "r:" + it.uri.toString() }) { ref ->
                     FileRow(
+                        kind = ref.kind,
                         name = ref.name,
-                        kindLabel = ref.kind.label,
-                        meta = ref.kind.label,
+                        meta = "",
                         onClick = { vm.openRef(ref) },
                     )
                 }
@@ -222,31 +273,42 @@ private fun HomeScreen(
 private fun FolderCard(connected: Boolean, name: String, onPickFolder: () -> Unit) {
     Surface(
         onClick = onPickFolder,
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                if (connected) Icons.Filled.Folder else Icons.Filled.CreateNewFolder,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(12.dp))
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (connected) Icons.Filled.Folder else Icons.Filled.CreateNewFolder,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     if (connected) name.ifBlank { "연결된 폴더" } else "다운로드 폴더 연결",
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (connected) "최근 받은 문서를 여기서 바로 열 수 있어요 · 탭하여 변경"
-                    else "다운로드 등 폴더를 연결하면 받은 문서가 여기에 표시돼요",
+                    if (connected) "받은 문서를 여기서 바로 · 탭하여 변경"
+                    else "다운로드 등 폴더를 연결하면 받은 문서가 표시돼요",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -269,29 +331,44 @@ private fun FilterRow(selected: HFilter, onSelect: (HFilter) -> Unit) {
 }
 
 @Composable
-private fun FileRow(name: String, kindLabel: String, meta: String, onClick: () -> Unit) {
+private fun FileRow(kind: DocKind, name: String, meta: String, onClick: () -> Unit) {
+    val style = styleFor(kind)
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(42.dp)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(kindLabel.take(2), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
-            }
-            Spacer(Modifier.width(12.dp))
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            FileIconTile(kind)
+            Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
-                Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
-                if (meta.isNotEmpty()) {
-                    Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                Text(
+                    name,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(style.color.copy(alpha = 0.16f))
+                            .padding(horizontal = 7.dp, vertical = 1.dp),
+                    ) {
+                        Text(style.tag, color = style.color, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                    if (meta.isNotEmpty()) {
+                        Spacer(Modifier.width(7.dp))
+                        Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
+            Spacer(Modifier.width(6.dp))
+            Text("›", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
