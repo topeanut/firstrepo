@@ -27,64 +27,49 @@ export function bbox(s) {
 const penWidth = (s, p) => s.width * (0.35 + 0.9 * (Number.isFinite(p) ? p : 0.7));
 const f = (v) => Math.round(v * 100) / 100;
 
-// Pen stroke as one filled outline: light smoothing, a pressure-dependent width per point,
-// offset curves on both sides joined by round caps. One fill gives clean anti-aliased edges
-// (no beads where segments overlap) and stays sharp at any zoom when drawn as SVG.
-export function penPath(s) {
-  const raw = s.pts;
-  // Drop points that are closer than ~0.3 units; they only add noise.
-  const P = [];
-  for (let i = 0; i < raw.length; i += 3) {
-    const n = P.length;
-    if (n && Math.abs(P[n - 3] - raw[i]) + Math.abs(P[n - 2] - raw[i + 1]) < 0.3 && i < raw.length - 3) continue;
-    P.push(raw[i], raw[i + 1], raw[i + 2]);
-  }
-  const n = P.length / 3;
-  if (n === 1) {
-    const r = penWidth(s, P[2]) / 2;
-    return `M${f(P[0] - r)} ${f(P[1])}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0Z`;
-  }
-  // 1-2-1 smoothing of positions and pressure (endpoints kept).
-  const X = new Float64Array(n), Y = new Float64Array(n), R = new Float64Array(n);
+// Pen stroke drawn along its centreline with a round nib (round caps and joins), smoothed by
+// quadratic curves through segment midpoints. Pressure is kept by splitting the stroke into
+// runs of similar width; runs share their end points, so the seams are invisible.
+// (An offset-outline fill was tried first: on tight turns in small handwriting its two sides
+// cross and leave blobs, which looked smudged.)
+export function penChunks(s) {
+  const p = s.pts;
+  const n = p.length / 3;
+  if (n === 1) return [{ d: `M${f(p[0])} ${f(p[1])}l0.01 0`, w: penWidth(s, p[2]) }];
+  // Width per point from lightly smoothed pressure; positions are used as recorded.
+  const W = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const a = Math.max(0, i - 1) * 3, b = i * 3, c = Math.min(n - 1, i + 1) * 3;
-    const end = i === 0 || i === n - 1;
-    X[i] = end ? P[b] : (P[a] + 2 * P[b] + P[c]) / 4;
-    Y[i] = end ? P[b + 1] : (P[a + 1] + 2 * P[b + 1] + P[c + 1]) / 4;
-    R[i] = penWidth(s, (P[a + 2] + 2 * P[b + 2] + P[c + 2]) / 4) / 2;
+    const a = Math.max(0, i - 1) * 3 + 2, b = i * 3 + 2, c = Math.min(n - 1, i + 1) * 3 + 2;
+    W[i] = penWidth(s, (p[a] + 2 * p[b] + p[c]) / 4);
   }
-  const L = [], Rt = [];
-  for (let i = 0; i < n; i++) {
-    let tx = X[Math.min(n - 1, i + 1)] - X[Math.max(0, i - 1)];
-    let ty = Y[Math.min(n - 1, i + 1)] - Y[Math.max(0, i - 1)];
-    const len = Math.hypot(tx, ty) || 1;
-    tx /= len;
-    ty /= len;
-    const nx = -ty * R[i], ny = tx * R[i];
-    L.push(X[i] + nx, Y[i] + ny);
-    Rt.push(X[i] - nx, Y[i] - ny);
-  }
-  // Quadratic curves through midpoints of each side.
-  const side = (A, rev) => {
-    const m = A.length / 2;
-    const at = (k) => (rev ? m - 1 - k : k);
-    let d = "";
-    for (let k = 1; k < m - 1; k++) {
-      const i = at(k) * 2, j = at(k + 1) * 2;
-      d += `Q${f(A[i])} ${f(A[i + 1])} ${f((A[i] + A[j]) / 2)} ${f((A[i + 1] + A[j + 1]) / 2)}`;
+  const mid = (k) => [(p[(k - 1) * 3] + p[k * 3]) / 2, (p[(k - 1) * 3 + 1] + p[k * 3 + 1]) / 2];
+  const chunks = [];
+  let d = "", sum = 0, cnt = 0;
+  for (let k = 1; k < n; k++) {
+    const w = W[k];
+    if (cnt && Math.abs(w - sum / cnt) > 0.05 * (sum / cnt)) {
+      chunks.push({ d, w: sum / cnt });
+      d = "";
+      sum = cnt = 0;
     }
-    const last = at(m - 1) * 2;
-    return d + `L${f(A[last])} ${f(A[last + 1])}`;
-  };
-  const re = R[n - 1], rs = R[0];
-  return (
-    `M${f(L[0])} ${f(L[1])}` +
-    side(L, false) +
-    `A${f(re)} ${f(re)} 0 0 0 ${f(Rt[(n - 1) * 2])} ${f(Rt[(n - 1) * 2 + 1])}` +
-    side(Rt, true) +
-    `A${f(rs)} ${f(rs)} 0 0 0 ${f(L[0])} ${f(L[1])}Z`
-  );
+    if (!d) {
+      const [sx, sy] = k === 1 ? [p[0], p[1]] : mid(k);
+      d = `M${f(sx)} ${f(sy)}`;
+    }
+    const x = p[k * 3], y = p[k * 3 + 1];
+    if (k === n - 1) d += `L${f(x)} ${f(y)}`;
+    else {
+      const [ex, ey] = mid(k + 1);
+      d += `Q${f(x)} ${f(y)} ${f(ex)} ${f(ey)}`;
+    }
+    sum += w;
+    cnt++;
+  }
+  if (d) chunks.push({ d, w: sum / cnt });
+  return chunks;
 }
+
+export const penSvg = (s) => penChunks(s).map((c) => `<path d="${c.d}" stroke-width="${f(c.w)}"/>`).join("");
 
 // Highlighter: a plain polyline stroked at constant width.
 export function hlPath(s) {
@@ -111,8 +96,12 @@ export function drawStroke(ctx, s, scale, faded = false, color = null) {
     ctx.stroke(new Path2D(hlPath(s)));
   } else {
     if (faded) ctx.globalAlpha = 0.45;
-    ctx.fillStyle = c;
-    ctx.fill(new Path2D(penPath(s)));
+    ctx.strokeStyle = c;
+    ctx.lineCap = ctx.lineJoin = "round";
+    for (const ch of penChunks(s)) {
+      ctx.lineWidth = ch.w;
+      ctx.stroke(new Path2D(ch.d));
+    }
   }
   ctx.restore();
 }
