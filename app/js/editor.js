@@ -1,12 +1,12 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { penSvg, penLine, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
+import { penSvg, penLine, hlPath, hitStroke, bbox, cutStroke, drawStrokes, HL_ALPHA } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
 import { renderRegion } from "./pdf.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
 import { getBlob, putDoc, putNote, deleteBlob, saveStrokes, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
 import { icon } from "./icons.js";
-import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem } from "./items.js";
+import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem, drawItems } from "./items.js";
 import { isDark, darkPdf, darkInk, cycleTheme, toggleDarkPdf, getTheme, THEME_LABEL, onThemeChange } from "./theme.js";
 
 const COLORS = ["#000000", "#5f6368", "#0a63d8", "#d93025", "#1e8e3e", "#f29900", "#8e44ad"];
@@ -542,6 +542,11 @@ export class Editor {
     this.updateVisible();
   }
 
+  isNear(pv, margin) {
+    const top = this.scroller.scrollTop - margin, bottom = this.scroller.scrollTop + this.scroller.clientHeight + margin;
+    return pv.el.offsetTop + pv.cssH > top && pv.el.offsetTop < bottom;
+  }
+
   visiblePages(margin) {
     const sc = this.scroller;
     const top = sc.scrollTop - margin, bottom = sc.scrollTop + sc.clientHeight + margin;
@@ -552,8 +557,8 @@ export class Editor {
     const h = this.scroller.clientHeight;
     // Render a screen and a half around the viewport so zooming out or scrolling reveals pages
     // that are already drawn; release only well beyond that.
-    const near = new Set(this.visiblePages(h * 1.5));
-    const keep = new Set(this.visiblePages(h * 3));
+    const near = new Set(this.visiblePages(h));
+    const keep = new Set(this.visiblePages(h * 2.5));
     for (const pv of this.pageViews) {
       if (near.has(pv)) {
         // Right after a zoom, re-rendering waits a moment (the stretched bitmap and vector ink
@@ -587,7 +592,7 @@ export class Editor {
           } else this._thumbVisible.delete(pv.page.id);
         }
       },
-      { root: bar, rootMargin: "300px 0px" }
+      { root: bar, rootMargin: "120px 0px" }
     );
     bar.querySelectorAll(".thumb-item").forEach((el) => this._thumbObs.observe(el));
     this._activeIdx = -1;
@@ -612,7 +617,7 @@ export class Editor {
       // Thumbnails are background work: wait for pen-up, exports and open/zoom animations.
       while (this.active || this.exporting || this._hold) await new Promise((r) => setTimeout(r, 400));
       try {
-        const c = await pageImage(this.doc, pv.page, 220);
+        const c = await this.thumbCanvas(pv.page);
         const url = c.toDataURL("image/jpeg", 0.7);
         c.width = c.height = 0;
         this.thumbs.set(pv.page.id, { url, stale: false });
@@ -622,6 +627,34 @@ export class Editor {
         this.thumbs.delete(pv.page.id);
       }
     });
+  }
+
+  // Thumbnail = cached page background (a PDF page is rendered once at thumbnail size) + current
+  // ink. Re-rendering the PDF after every pause in writing caused visible hitches on big PDFs.
+  async thumbCanvas(page) {
+    const W = 220, H = Math.round((W * page.h) / page.w);
+    this.thumbBg ||= new Map();
+    let bg = this.thumbBg.get(page.id);
+    if (!bg) {
+      bg = document.createElement("canvas");
+      bg.width = W;
+      bg.height = H;
+      await drawBackground(bg, page);
+      this.thumbBg.set(page.id, bg);
+      if (this.thumbBg.size > 150) {
+        const [oldId, old] = this.thumbBg.entries().next().value;
+        old.width = old.height = 0;
+        this.thumbBg.delete(oldId);
+      }
+    }
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bg, 0, 0);
+    await drawItems(ctx, (this.doc.items || []).filter((i) => i.page === page.id), W / page.w);
+    drawStrokes(ctx, this.byPage.get(page.id) || [], W / page.w);
+    return c;
   }
 
   staleThumb(pageId) {
@@ -635,7 +668,7 @@ export class Editor {
           if (el) this.showThumb(this.pvOf(id), el);
         }
       }
-    }, 1200);
+    }, 2500);
   }
 
   updateIndicator() {
@@ -734,24 +767,25 @@ export class Editor {
     pv.el.classList.toggle("inverted", inverted);
     const key = `${W}x${H}`;
     if (pv.bgKey === key && pv.bg.width) return this.scheduleDetail();
-    // First appearance: put a quick quarter-resolution render up immediately so the page is
-    // never shown blank while the full-resolution one is drawn.
-    if (!pv.bg.width) {
-      const quick = document.createElement("canvas");
-      quick.width = Math.max(1, Math.round(W / 4));
-      quick.height = Math.max(1, Math.round(H / 4));
-      const qjob = async () => token === pv.token && pv.rendered && (await drawBackground(quick, pv.page, isDark()), true);
-      const qran = await (this._bgQ = (this._bgQ || Promise.resolve()).then(qjob, qjob));
-      if (!qran || token !== pv.token || !pv.rendered) return;
-      quick.className = "bg";
-      pv.bg.replaceWith(quick);
-      pv.bg = quick;
+    // First appearance: until the PDF page is drawn, show its thumbnail (when one exists)
+    // instead of white. (A separate low-resolution render doubled the work on scanned PDFs.)
+    if (!pv.bg.width && !pv.el.style.backgroundImage) {
+      const t = this.thumbs.get(pv.page.id);
+      if (t?.url) pv.el.style.backgroundImage = `url("${t.url}")`;
     }
     const off = document.createElement("canvas");
     off.width = W;
     off.height = H;
     // One PDF render at a time (pdf.js paints on the main thread); skip work that went stale.
-    const job = async () => token === pv.token && pv.rendered && (await drawBackground(off, pv.page, isDark()), true);
+    const job = async () => {
+      if (token !== pv.token || !pv.rendered) return false;
+      if (!this.isNear(pv, this.scroller.clientHeight * 1.5)) {
+        pv.needsRender = true; // scrolled away while queued; render when it comes back
+        return false;
+      }
+      await drawBackground(off, pv.page, isDark());
+      return true;
+    };
     const ran = await (this._bgQ = (this._bgQ || Promise.resolve()).then(job, job));
     if (!ran || token !== pv.token || !pv.rendered) {
       off.width = off.height = 0;
@@ -788,7 +822,9 @@ export class Editor {
     const box = this.scroller.getBoundingClientRect();
     const visible = new Set(this.visiblePages(0));
     for (const pv of this.pageViews) {
-      if (!visible.has(pv) || pv.page.bg.type !== "pdf" || !pv.rendered || !pv.bg.width || pv.pr >= dpr * 0.92) {
+      // Only when zoomed in: at normal size the page bitmap is close enough and re-rendering the
+      // visible region after every scroll made big scanned PDFs hitch.
+      if (!visible.has(pv) || pv.page.bg.type !== "pdf" || !pv.rendered || !pv.bg.width || pv.pr >= dpr * 0.92 || this.zoom < 1.2) {
         if (pv.detail || pv.detailTask) this.dropDetail(pv);
         continue;
       }
@@ -1373,15 +1409,40 @@ export class Editor {
     return evs;
   }
 
+  // Adds pointer samples to the stroke in time order. iPad Safari can deliver pointerdown late
+  // (the pen has already moved) and then replay the touch's earlier samples in the next move;
+  // appending those as-is drew the start of a line back up and down again — a doubled line.
   addPoint(pv, e) {
-    const s = this.active.stroke;
-    for (const ev of this.samples(e)) {
+    const a = this.active;
+    const s = a.stroke;
+    const ts = (a.ts ||= []);
+    const batch = this.samples(e).map((ev) => {
       const [x, y] = this.pagePoint(pv, ev);
-      const n = s.pts.length;
-      if (n && Math.hypot(s.pts[n - 3] - x, s.pts[n - 2] - y) < 0.4) continue;
-      let p = ev.pointerType === "pen" ? ev.pressure : 0.5;
-      if (!p) p = 0.5;
-      s.pts.push(Math.round(x * 100) / 100, Math.round(y * 100) / 100, Math.round(p * 100) / 100);
+      const p = (ev.pointerType === "pen" ? ev.pressure : 0.5) || 0.5;
+      return [Math.round(x * 100) / 100, Math.round(y * 100) / 100, Math.round(p * 100) / 100, ev.timeStamp];
+    });
+    // Same correction when timestamps are unusable: if the first move's samples start behind
+    // the pointerdown point, that point came out of order and is dropped.
+    if (s.pts.length === 3 && batch.length > 1) {
+      const [x0, y0] = s.pts, f = batch[0], l = batch[batch.length - 1];
+      if (Math.hypot(f[0] - l[0], f[1] - l[1]) > Math.hypot(x0 - l[0], y0 - l[1]) + 2) {
+        s.pts.length = 0;
+        ts.length = 0;
+      }
+    }
+    for (const [x, y, p, t] of batch) {
+      const n = ts.length;
+      if (n && t < ts[n - 1] - 0.1) {
+        let i = n;
+        while (i > 0 && ts[i - 1] > t) i--;
+        ts.splice(i, 0, t);
+        s.pts.splice(i * 3, 0, x, y, p);
+        continue;
+      }
+      const m = s.pts.length;
+      if (m && Math.hypot(s.pts[m - 3] - x, s.pts[m - 2] - y) < 0.4) continue;
+      ts.push(t);
+      s.pts.push(x, y, p);
     }
   }
 
