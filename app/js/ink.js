@@ -50,23 +50,31 @@ export function drawStroke(ctx, s, scale, faded = false, color = null) {
       ctx.arc(pts[0] * scale, pts[1] * scale, (penWidth(s, pts[2]) * scale) / 2, 0, Math.PI * 2);
       ctx.fill();
     } else {
-      // Variable-width polyline: one segment per lineWidth, smoothed through midpoints.
-      let px = pts[0], py = pts[1];
-      for (let i = 3; i < pts.length; i += 3) {
-        const x = pts[i], y = pts[i + 1];
-        const mx = i + 3 < pts.length ? (x + pts[i + 3]) / 2 : x;
-        const my = i + 3 < pts.length ? (y + pts[i + 4]) / 2 : y;
-        ctx.lineWidth = Math.max(0.6, penWidth(s, pts[i + 2]) * scale);
-        ctx.beginPath();
-        ctx.moveTo(px * scale, py * scale);
-        ctx.quadraticCurveTo(x * scale, y * scale, mx * scale, my * scale);
-        ctx.stroke();
-        px = mx;
-        py = my;
-      }
+      drawPenRange(ctx, s, scale, 1, n - 1);
     }
   }
   ctx.restore();
+}
+
+// Variable-width pen polyline smoothed through midpoints. Segment i (1-based point index) runs
+// from the midpoint before point i, curving through it, to the midpoint after it; segments
+// therefore only depend on their neighbours and can be drawn incrementally while writing.
+export function drawPenRange(ctx, s, scale, from, to) {
+  const pts = s.pts;
+  const n = pts.length / 3;
+  for (let i = Math.max(1, from); i <= Math.min(to, n - 1); i++) {
+    const j = i * 3;
+    const sx = i === 1 ? pts[0] : (pts[j - 3] + pts[j]) / 2;
+    const sy = i === 1 ? pts[1] : (pts[j - 2] + pts[j + 1]) / 2;
+    const last = i === n - 1;
+    const ex = last ? pts[j] : (pts[j] + pts[j + 3]) / 2;
+    const ey = last ? pts[j + 1] : (pts[j + 1] + pts[j + 4]) / 2;
+    ctx.lineWidth = Math.max(0.6, penWidth(s, pts[j + 2]) * scale);
+    ctx.beginPath();
+    ctx.moveTo(sx * scale, sy * scale);
+    ctx.quadraticCurveTo(pts[j] * scale, pts[j + 1] * scale, ex * scale, ey * scale);
+    ctx.stroke();
+  }
 }
 
 // Highlighters render under pen ink, like on paper.

@@ -22,7 +22,10 @@ async function showLibrary() {
   const notes = await listNotes();
   root.innerHTML = `
     <header class="lib-head">
-      <h1>Penote</h1>
+      <div>
+        <div class="brand">Penote</div>
+        <h1>노트<span class="lib-count">${notes.length ? notes.length + "개" : ""}</span></h1>
+      </div>
       <div class="lib-actions">
         <button class="btn" data-act="theme" title="테마">${icon(themeIcon())}<span>${THEME_LABEL[getTheme()]}</span></button>
         <button class="btn" data-act="import">${icon("import")}<span>가져오기</span></button>

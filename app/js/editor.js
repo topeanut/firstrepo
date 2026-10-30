@@ -1,8 +1,8 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { drawStroke, drawStrokes, hitStroke, bbox, cutStroke } from "./ink.js";
+import { drawStroke, drawStrokes, drawPenRange, hitStroke, bbox, cutStroke } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
-import { getBlob, putDoc, putNote, uid } from "./db.js";
+import { getBlob, putDoc, putNote, deleteBlob, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
 import { icon } from "./icons.js";
 import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem } from "./items.js";
@@ -76,9 +76,13 @@ export class Editor {
   build() {
     this.root.innerHTML = `
       <header class="toolbar">
-        <div class="tb-group">
+        <div class="tb-group tb-left">
           <button class="icon-btn" data-act="back" title="라이브러리">${icon("back")}</button>
-          <button class="icon-btn" data-act="sidebar" title="페이지 미리보기">${icon("pages")}</button>
+          <div class="undo-group" role="group" aria-label="실행 취소">
+            <button class="icon-btn" data-act="undo" title="실행 취소 (두 손가락 탭)">${icon("undo")}</button>
+            <button class="icon-btn" data-act="redo" title="다시 실행 (세 손가락 탭)">${icon("redo")}</button>
+          </div>
+          <button class="icon-btn hide-narrow" data-act="sidebar" title="페이지 미리보기">${icon("pages")}</button>
           <input class="title-input" value="" aria-label="노트 제목" />
         </div>
         <div class="tb-group tools">
@@ -90,13 +94,11 @@ export class Editor {
           <span class="swatches"></span>
           <span class="sizes"></span>
         </div>
-        <div class="tb-group">
+        <div class="tb-group tb-right">
           <button class="icon-btn" data-act="add" title="추가 (사진, PDF, 파일, 페이지)">${icon("plus")}</button>
-          <button class="icon-btn" data-act="undo" title="실행 취소">${icon("undo")}</button>
-          <button class="icon-btn" data-act="redo" title="다시 실행">${icon("redo")}</button>
           <button class="icon-btn" data-act="record" title="녹음 시작">${icon("mic")}</button>
           <button class="icon-btn" data-act="player" title="녹음 듣기">${icon("play")}</button>
-          <button class="icon-btn" data-act="split" title="화면 분할">${icon("split")}</button>
+          <button class="icon-btn hide-narrow" data-act="split" title="화면 분할">${icon("split")}</button>
           <button class="icon-btn" data-act="more" title="더보기">${icon("more")}</button>
         </div>
       </header>
@@ -137,6 +139,7 @@ export class Editor {
         <span class="dur">0:00</span>
         <button class="chip" data-act="speed">1x</button>
         <button class="chip on" data-act="replay" title="재생 위치 이후 필기를 흐리게 표시">리플레이</button>
+        <button class="icon-btn danger" data-act="rec-delete" title="이 녹음 삭제">${icon("trash")}</button>
         <button class="icon-btn" data-act="close-player" title="닫기">${icon("close")}</button>
       </div>
       <div class="body">
@@ -389,6 +392,9 @@ export class Editor {
         btn.classList.toggle("on", this.replay);
         this.redrawVisible();
         break;
+      case "rec-delete":
+        this.deleteRecording();
+        break;
       case "close-player":
         this.closePlayer();
         break;
@@ -462,11 +468,13 @@ export class Editor {
   }
 
   updateVisible() {
-    const near = new Set(this.visiblePages(this.scroller.clientHeight * 0.75));
+    const h = this.scroller.clientHeight;
+    const near = new Set(this.visiblePages(h));
+    const keep = new Set(this.visiblePages(h * 2.5));
     for (const pv of this.pageViews) {
       if (near.has(pv)) {
         if (!pv.rendered) this.renderPage(pv);
-      } else if (pv.rendered) this.release(pv);
+      } else if (pv.rendered && !keep.has(pv)) this.release(pv);
     }
     this.updateIndicator();
   }
@@ -516,6 +524,7 @@ export class Editor {
     if (t?.pending) return;
     this.thumbs.set(pv.page.id, { ...t, pending: true });
     this._thumbQ = (this._thumbQ || Promise.resolve()).then(async () => {
+      while (this.active || this.exporting) await new Promise((r) => setTimeout(r, 400));
       try {
         const c = await pageImage(this.doc, pv.page, 220);
         const url = c.toDataURL("image/jpeg", 0.7);
@@ -682,11 +691,24 @@ export class Editor {
   }
   afterChange(strokes) {
     for (const id of new Set(strokes.map((s) => s.page))) {
-      const pv = this.pvOf(id);
-      if (pv) this.redrawInk(pv);
+      this.scheduleRedraw(id);
       this.staleThumb(id);
     }
     this.dirty();
+  }
+
+  // Coalesces ink redraws to one per page per animation frame.
+  scheduleRedraw(pageId) {
+    (this._redraw ||= new Set()).add(pageId);
+    if (this._redrawRaf) return;
+    this._redrawRaf = requestAnimationFrame(() => {
+      this._redrawRaf = 0;
+      for (const id of this._redraw) {
+        const pv = this.pvOf(id);
+        if (pv) this.redrawInk(pv);
+      }
+      this._redraw.clear();
+    });
   }
   pushUndo(op) {
     this.undoStack.push(op);
@@ -1050,8 +1072,25 @@ export class Editor {
       const a = this.active;
       if (!a?.stroke) return;
       const ctx = this.live.getContext("2d");
-      ctx.clearRect(0, 0, this.live.width, this.live.height);
-      drawStroke(ctx, a.stroke, this.live.width / a.pv.page.w, false, this.pageDark(a.pv) ? darkInk : null);
+      const s = a.stroke;
+      const scale = this.live.width / a.pv.page.w;
+      const color = this.pageDark(a.pv) ? darkInk : null;
+      const n = s.pts.length / 3;
+      if (s.tool === "hl" || n < 3) {
+        // Highlighter is translucent, so it is redrawn as one path.
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        drawStroke(ctx, s, scale, false, color);
+        a.liveDone = 0;
+        return;
+      }
+      // Pen: only draw segments that became final since the last frame.
+      if (!a.liveDone) ctx.clearRect(0, 0, this.live.width, this.live.height);
+      ctx.save();
+      ctx.lineCap = ctx.lineJoin = "round";
+      ctx.strokeStyle = color ? color(s.color) : s.color;
+      drawPenRange(ctx, s, scale, (a.liveDone || 0) + 1, n - 2);
+      ctx.restore();
+      a.liveDone = n - 2;
     });
   }
 
@@ -1142,8 +1181,14 @@ export class Editor {
       this.pushUndo({ type: "replace", removed: a.erase.removed, added: [...a.erase.added] });
     }
     if (a.stroke && a.stroke.pts.length) {
-      this.addStrokes([a.stroke]);
-      this.pushUndo({ type: "add", strokes: [a.stroke] });
+      const s = a.stroke;
+      this.addStrokes([s], false);
+      if (s.tool === "pen" && a.pv.rendered && !this.fadedFn()?.(s)) {
+        drawStroke(a.pv.ink.getContext("2d"), s, a.pv.ink.width / a.pv.page.w, false, this.pageDark(a.pv) ? darkInk : null);
+      } else this.scheduleRedraw(s.page);
+      this.staleThumb(s.page);
+      this.dirty();
+      this.pushUndo({ type: "add", strokes: [s] });
     }
   }
 
@@ -1219,6 +1264,24 @@ export class Editor {
     this.toast("필기를 탭하면 그때 녹음된 부분부터 재생돼요.");
   }
 
+  async deleteRecording() {
+    const rec = this.player.recording;
+    if (!rec) return;
+    const linked = this.doc.strokes.filter((s) => s.audio?.rec === rec.id).length;
+    const msg = `"${rec.name}" (${fmtTime(rec.duration)}) 녹음을 삭제할까요?` +
+      (linked ? `\n필기 ${linked}개는 그대로 남고, 녹음 연결만 사라져요.` : "") + "\n되돌릴 수 없어요.";
+    if (!confirm(msg)) return;
+    this.closePlayer();
+    this.doc.recordings = this.doc.recordings.filter((r) => r !== rec);
+    for (const s of this.doc.strokes) if (s.audio?.rec === rec.id) s.audio = null;
+    for (const op of [...this.undoStack, ...this.redoStack]) {
+      for (const s of [...(op.strokes || []), ...(op.added || []), ...(op.removed || [])]) if (s.audio?.rec === rec.id) s.audio = null;
+    }
+    await deleteBlob(rec.blob).catch(() => {});
+    this.dirty();
+    this.toast(`"${rec.name}" 삭제됨`);
+  }
+
   closePlayer() {
     this.player.close();
     this.$(".playerbar").classList.add("hidden");
@@ -1262,7 +1325,7 @@ export class Editor {
   dirty() {
     this.doc.modified = Date.now();
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.saveNow(), 800);
+    this.saveTimer = setTimeout(() => (this.active ? this.dirty() : this.saveNow()), 1500);
   }
 
   async saveNow(withThumb = false) {
@@ -1276,6 +1339,7 @@ export class Editor {
 
   async exportPdf() {
     try {
+      this.exporting = true;
       this.toast("PDF 만드는 중…", 0);
       const blob = await exportPdf(this.doc, (i, n) => this.toast(`PDF 만드는 중… ${i}/${n}`, 0));
       const name = (this.doc.title || "note").replace(/[\\/:*?"<>|]/g, "_") + ".pdf";
@@ -1293,6 +1357,8 @@ export class Editor {
       }
     } catch (err) {
       this.toast("내보내기 실패: " + (err.message || err), 4000);
+    } finally {
+      this.exporting = false;
     }
   }
 

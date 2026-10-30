@@ -97,8 +97,9 @@ export async function exportPdf(doc, onProgress) {
   for (let i = 0; i < n; i++) {
     const page = doc.pages[i];
     const W = 612, H = (612 * page.h) / page.w;
-    const c = await pageImage(doc, page, 1600);
-    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.88));
+    // ~150 dpi across a letter-width page: sharp in print, quick on iPad.
+    const c = await pageImage(doc, page, 1280);
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.86));
     const jpg = new Uint8Array(await blob.arrayBuffer());
     const [pid, cid, iid] = [3 + i * 3, 4 + i * 3, 5 + i * 3];
     obj(pid, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H.toFixed(2)}] /Resources << /XObject << /Im0 ${iid} 0 R >> >> /Contents ${cid} 0 R >>`);
