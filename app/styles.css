@@ -298,7 +298,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   touch-action: pan-x pan-y; background: var(--canvas);
 }
 .scroller.finger-draw { touch-action: none; }
-.pages { display: flex; flex-direction: column; align-items: center; gap: 22px; padding: 22px 16px 40vh; width: max-content; min-width: 100%; }
+.pages {
+  --z: 1; display: flex; flex-direction: column; align-items: center;
+  gap: calc(22px * var(--z)); padding: calc(22px * var(--z)) calc(16px * var(--z)) 40vh;
+  width: max-content; min-width: 100%;
+}
 .page { position: relative; flex: none; background: #fff; border-radius: 3px; box-shadow: var(--page-shadow); contain: layout style; }
 .page canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; border-radius: 3px; }
 .page canvas.bg.fresh { animation: fade-in 0.3s ease-out; }
