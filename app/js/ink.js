@@ -23,58 +23,98 @@ export function bbox(s) {
   return bb;
 }
 
-const penWidth = (s, p) => s.width * (0.35 + 0.9 * p);
+// Pressure may be missing/NaN in notes imported by older versions; fall back to a mid value.
+const penWidth = (s, p) => s.width * (0.35 + 0.9 * (Number.isFinite(p) ? p : 0.7));
+const f = (v) => Math.round(v * 100) / 100;
 
-// `color` maps the stored colour to the displayed one (e.g. for dark paper).
-export function drawStroke(ctx, s, scale, faded = false, color = null) {
-  const pts = s.pts;
-  const n = pts.length / 3;
-  if (!n) return;
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = ctx.fillStyle = faded ? "#9aa3ad" : color ? color(s.color) : s.color;
-  if (s.tool === "hl") {
-    ctx.globalAlpha = faded ? 0.15 : HL_ALPHA;
-    ctx.lineWidth = s.width * scale;
-    ctx.lineCap = "butt";
-    ctx.beginPath();
-    ctx.moveTo(pts[0] * scale, pts[1] * scale);
-    for (let i = 3; i < pts.length; i += 3) ctx.lineTo(pts[i] * scale, pts[i + 1] * scale);
-    if (n === 1) ctx.lineTo(pts[0] * scale + 0.1, pts[1] * scale);
-    ctx.stroke();
-  } else {
-    if (faded) ctx.globalAlpha = 0.45;
-    if (n === 1) {
-      ctx.beginPath();
-      ctx.arc(pts[0] * scale, pts[1] * scale, (penWidth(s, pts[2]) * scale) / 2, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      drawPenRange(ctx, s, scale, 1, n - 1);
-    }
+// Pen stroke as one filled outline: light smoothing, a pressure-dependent width per point,
+// offset curves on both sides joined by round caps. One fill gives clean anti-aliased edges
+// (no beads where segments overlap) and stays sharp at any zoom when drawn as SVG.
+export function penPath(s) {
+  const raw = s.pts;
+  // Drop points that are closer than ~0.3 units; they only add noise.
+  const P = [];
+  for (let i = 0; i < raw.length; i += 3) {
+    const n = P.length;
+    if (n && Math.abs(P[n - 3] - raw[i]) + Math.abs(P[n - 2] - raw[i + 1]) < 0.3 && i < raw.length - 3) continue;
+    P.push(raw[i], raw[i + 1], raw[i + 2]);
   }
-  ctx.restore();
+  const n = P.length / 3;
+  if (n === 1) {
+    const r = penWidth(s, P[2]) / 2;
+    return `M${f(P[0] - r)} ${f(P[1])}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0Z`;
+  }
+  // 1-2-1 smoothing of positions and pressure (endpoints kept).
+  const X = new Float64Array(n), Y = new Float64Array(n), R = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - 1) * 3, b = i * 3, c = Math.min(n - 1, i + 1) * 3;
+    const end = i === 0 || i === n - 1;
+    X[i] = end ? P[b] : (P[a] + 2 * P[b] + P[c]) / 4;
+    Y[i] = end ? P[b + 1] : (P[a + 1] + 2 * P[b + 1] + P[c + 1]) / 4;
+    R[i] = penWidth(s, (P[a + 2] + 2 * P[b + 2] + P[c + 2]) / 4) / 2;
+  }
+  const L = [], Rt = [];
+  for (let i = 0; i < n; i++) {
+    let tx = X[Math.min(n - 1, i + 1)] - X[Math.max(0, i - 1)];
+    let ty = Y[Math.min(n - 1, i + 1)] - Y[Math.max(0, i - 1)];
+    const len = Math.hypot(tx, ty) || 1;
+    tx /= len;
+    ty /= len;
+    const nx = -ty * R[i], ny = tx * R[i];
+    L.push(X[i] + nx, Y[i] + ny);
+    Rt.push(X[i] - nx, Y[i] - ny);
+  }
+  // Quadratic curves through midpoints of each side.
+  const side = (A, rev) => {
+    const m = A.length / 2;
+    const at = (k) => (rev ? m - 1 - k : k);
+    let d = "";
+    for (let k = 1; k < m - 1; k++) {
+      const i = at(k) * 2, j = at(k + 1) * 2;
+      d += `Q${f(A[i])} ${f(A[i + 1])} ${f((A[i] + A[j]) / 2)} ${f((A[i + 1] + A[j + 1]) / 2)}`;
+    }
+    const last = at(m - 1) * 2;
+    return d + `L${f(A[last])} ${f(A[last + 1])}`;
+  };
+  const re = R[n - 1], rs = R[0];
+  return (
+    `M${f(L[0])} ${f(L[1])}` +
+    side(L, false) +
+    `A${f(re)} ${f(re)} 0 0 0 ${f(Rt[(n - 1) * 2])} ${f(Rt[(n - 1) * 2 + 1])}` +
+    side(Rt, true) +
+    `A${f(rs)} ${f(rs)} 0 0 0 ${f(L[0])} ${f(L[1])}Z`
+  );
 }
 
-// Variable-width pen polyline smoothed through midpoints. Segment i (1-based point index) runs
-// from the midpoint before point i, curving through it, to the midpoint after it; segments
-// therefore only depend on their neighbours and can be drawn incrementally while writing.
-export function drawPenRange(ctx, s, scale, from, to) {
-  const pts = s.pts;
-  const n = pts.length / 3;
-  for (let i = Math.max(1, from); i <= Math.min(to, n - 1); i++) {
-    const j = i * 3;
-    const sx = i === 1 ? pts[0] : (pts[j - 3] + pts[j]) / 2;
-    const sy = i === 1 ? pts[1] : (pts[j - 2] + pts[j + 1]) / 2;
-    const last = i === n - 1;
-    const ex = last ? pts[j] : (pts[j] + pts[j + 3]) / 2;
-    const ey = last ? pts[j + 1] : (pts[j + 1] + pts[j + 4]) / 2;
-    ctx.lineWidth = Math.max(0.6, penWidth(s, pts[j + 2]) * scale);
-    ctx.beginPath();
-    ctx.moveTo(sx * scale, sy * scale);
-    ctx.quadraticCurveTo(pts[j] * scale, pts[j + 1] * scale, ex * scale, ey * scale);
-    ctx.stroke();
+// Highlighter: a plain polyline stroked at constant width.
+export function hlPath(s) {
+  const p = s.pts;
+  let d = `M${f(p[0])} ${f(p[1])}`;
+  for (let i = 3; i < p.length; i += 3) d += `L${f(p[i])} ${f(p[i + 1])}`;
+  if (p.length === 3) d += `l0.1 0`;
+  return d;
+}
+
+// Canvas version (thumbnails, PDF export): same geometry as the SVG paths.
+// `color` maps the stored colour to the displayed one (e.g. for dark paper).
+export function drawStroke(ctx, s, scale, faded = false, color = null) {
+  if (!s.pts.length) return;
+  ctx.save();
+  ctx.scale(scale, scale);
+  const c = faded ? "#9aa3ad" : color ? color(s.color) : s.color;
+  if (s.tool === "hl") {
+    ctx.globalAlpha = faded ? 0.15 : HL_ALPHA;
+    ctx.strokeStyle = c;
+    ctx.lineWidth = s.width;
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "round";
+    ctx.stroke(new Path2D(hlPath(s)));
+  } else {
+    if (faded) ctx.globalAlpha = 0.45;
+    ctx.fillStyle = c;
+    ctx.fill(new Path2D(penPath(s)));
   }
+  ctx.restore();
 }
 
 // Highlighters render under pen ink, like on paper.

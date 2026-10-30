@@ -86,7 +86,9 @@ export async function importNote(file) {
     const n = arc.deref(hash.numcurves) || 0;
     const counts = u32(arc.get(hash, "curvesnumpoints"));
     const pts = f32(arc.get(hash, "curvespoints"));
-    const forces = arc.get(hash, "curvesforces") ? f32(arc.get(hash, "curvesforces")) : null;
+    // Per-point pressure; some files store fewer values than points, so only trust a full set.
+    let forces = arc.get(hash, "curvesforces") ? f32(arc.get(hash, "curvesforces")) : null;
+    if (forces && forces.length * 2 !== pts.length) forces = null;
     const colors = arc.get(hash, "curvescolors");
     const widths = f32(arc.get(hash, "curveswidth"));
     const uuids = arc.get(hash, "curveUUIDs");

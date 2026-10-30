@@ -48,3 +48,35 @@ export async function renderPage(key, pageNo, canvas) {
     if (e?.name !== "RenderingCancelledException") throw e;
   }
 }
+
+// Renders part of a page: the page is laid out `fullWidth` pixels wide and the region starting
+// at (x, y) pixels is drawn into `canvas`. Returns { promise, cancel }.
+export function renderRegion(key, pageNo, canvas, fullWidth, x, y) {
+  let task = null;
+  let cancelled = false;
+  const promise = (async () => {
+    const pdf = await loadPdf(key);
+    const page = await pdf.getPage(pageNo);
+    if (cancelled) return false;
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: fullWidth / base.width });
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    task = page.render({ canvasContext: ctx, viewport: vp, transform: [1, 0, 0, 1, -x, -y] });
+    try {
+      await task.promise;
+      return !cancelled;
+    } catch (e) {
+      if (e?.name === "RenderingCancelledException") return false;
+      throw e;
+    }
+  })();
+  return {
+    promise,
+    cancel() {
+      cancelled = true;
+      task?.cancel();
+    },
+  };
+}
