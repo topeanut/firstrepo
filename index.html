@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="description" content="광고 없는 모바일 PDF 뷰어 및 에디터. 모든 처리는 기기 내에서 이루어지며 데이터는 전송되지 않습니다." />
+  <title>Paper · PDF 뷰어 & 에디터</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body data-theme="auto">
+  <!-- 상단 앱 바 -->
+  <header class="appbar" id="appbar">
+    <button class="icon-btn" id="btnThumbs" title="페이지 목록" aria-label="페이지 목록">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h7v6H4zM4 13h7v6H4zM13 5h7v6h-7zM13 13h7v6h-7z"/></svg>
+    </button>
+    <div class="title" id="docTitle">Paper</div>
+    <div class="appbar-spacer"></div>
+    <button class="icon-btn" id="btnZoomOut" title="축소" aria-label="축소" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z"/></svg>
+    </button>
+    <span class="zoom-label" id="zoomLabel">100%</span>
+    <button class="icon-btn" id="btnZoomIn" title="확대" aria-label="확대" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+    </button>
+    <button class="icon-btn" id="btnNight" title="야간 모드" aria-label="야간 모드" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.5 5.5 0 0 1 12.4 3.1c-.13-.06-.27-.08-.4-.1z"/></svg>
+    </button>
+    <button class="icon-btn" id="btnSave" title="저장 / 내보내기" aria-label="저장" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM15 9H6V5h9z"/></svg>
+    </button>
+  </header>
+
+  <!-- 썸네일 서랍 -->
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <span>페이지</span>
+      <button class="icon-btn" id="btnCloseDrawer" aria-label="닫기">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7l1.4-1.4L10.6 10.6 16.9 4.3z"/></svg>
+      </button>
+    </div>
+    <div class="thumbs" id="thumbs"></div>
+    <p class="drawer-hint">길게 눌러 드래그하면 순서를 바꿀 수 있어요.</p>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <!-- 본문 -->
+  <main class="viewer" id="viewer">
+    <div class="pages" id="pages"></div>
+
+    <!-- 빈 상태 -->
+    <section class="empty" id="empty">
+      <div class="empty-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm7 1.5V7h3.5z"/></svg>
+      </div>
+      <h1>Paper</h1>
+      <p>광고 없는 PDF 뷰어 &amp; 에디터<br /><small>파일은 기기 밖으로 전송되지 않습니다.</small></p>
+      <button class="primary" id="btnOpen">PDF 열기</button>
+      <p class="drop-hint">또는 파일을 이곳에 끌어다 놓으세요</p>
+    </section>
+  </main>
+
+  <!-- 하단 도구막대 -->
+  <nav class="toolbar" id="toolbar" aria-hidden="true">
+    <button class="tool" data-tool="pan" title="이동/보기">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3a1.5 1.5 0 0 1 3 0v6h.5V4.5a1.5 1.5 0 0 1 3 0V10h.5V6.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1a7 7 0 0 1-5-2l-3.3-3.3a1.6 1.6 0 0 1 2.3-2.3L9 15z"/></svg>
+      <span>보기</span>
+    </button>
+    <button class="tool" data-tool="pen" title="펜">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.3V21h3.7L17.6 10 14 6.4zM20.7 7a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.8 1.8L19 8.8z"/></svg>
+      <span>펜</span>
+    </button>
+    <button class="tool" data-tool="highlighter" title="형광펜">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16v2H4zM15.6 3.4l5 5-8 8H7.5v-5zM6 18.5 5 17l1.5-1.5L8 17z"/></svg>
+      <span>형광펜</span>
+    </button>
+    <button class="tool" data-tool="eraser" title="지우개">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.2 3.3 21 8.1a2 2 0 0 1 0 2.8L12 20H6l-2.8-2.8a2 2 0 0 1 0-2.8L13.4 3.3a2 2 0 0 1 2.8 0zM8.8 18l6-6-3.8-3.8-6 6L7 16z"/></svg>
+      <span>지우개</span>
+    </button>
+    <div class="tool-sep"></div>
+    <div class="palette" id="palette">
+      <button class="swatch" data-color="#111418" style="--c:#111418"></button>
+      <button class="swatch" data-color="#e23b3b" style="--c:#e23b3b"></button>
+      <button class="swatch" data-color="#2f74e0" style="--c:#2f74e0"></button>
+      <button class="swatch" data-color="#1fa463" style="--c:#1fa463"></button>
+      <button class="swatch" data-color="#f2b705" style="--c:#f2b705"></button>
+    </div>
+    <label class="size">
+      <input type="range" id="sizeRange" min="1" max="40" value="4" />
+    </label>
+    <div class="tool-sep"></div>
+    <button class="tool" id="btnUndo" title="실행취소" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V1L6 7l6 6V9a6 6 0 1 1-6 6H4a8 8 0 1 0 8-10z"/></svg>
+      <span>취소</span>
+    </button>
+  </nav>
+
+  <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="spinner" id="spinner" hidden><div class="dot"></div><span id="spinnerText">여는 중…</span></div>
+
+  <!-- 라이브러리 (버전 고정) -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="assets/js/app.js" defer></script>
+</body>
+</html>
