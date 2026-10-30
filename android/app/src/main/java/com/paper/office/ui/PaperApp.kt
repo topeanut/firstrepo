@@ -125,10 +125,11 @@ fun PaperApp(
     onSaveAs: (String) -> Unit,
     onPickFolder: () -> Unit,
     onExportPdf: (String) -> Unit,
+    onRequestStorage: () -> Unit,
 ) {
     val current = vm.current
     if (current == null) {
-        HomeScreen(vm = vm, onOpen = onOpen, onPickFolder = onPickFolder)
+        HomeScreen(vm = vm, onOpen = onOpen, onRequestStorage = onRequestStorage)
     } else {
         DocumentScreen(
             vm = vm, ref = current, onOpen = onOpen, onSaveAs = onSaveAs,
@@ -195,11 +196,11 @@ private fun FileIconTile(kind: DocKind, size: Int = 46) {
 private fun HomeScreen(
     vm: AppViewModel,
     onOpen: () -> Unit,
-    onPickFolder: () -> Unit,
+    onRequestStorage: () -> Unit,
 ) {
     var filter by remember { mutableStateOf(HFilter.ALL) }
-    val files = remember(vm.folderFiles.toList(), filter) {
-        vm.folderFiles.filter { filter.kinds == null || it.kind in filter.kinds!! }
+    val files = remember(vm.allFiles.toList(), filter) {
+        vm.allFiles.filter { filter.kinds == null || it.kind in filter.kinds!! }
     }
 
     Scaffold(
@@ -238,21 +239,29 @@ private fun HomeScreen(
                 )
             }
 
-            // 폴더 연결 카드
-            item { FolderCard(vm.folderUri != null, vm.folderName, onPickFolder) }
-
-            if (vm.folderUri != null) {
+            if (!vm.hasStorageAccess) {
+                item { AccessCard(onRequestStorage) }
+            } else {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("기기 문서", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.scanDevice() }, enabled = !vm.scanLoading) { Text("새로고침") }
+                    }
+                }
                 item { FilterRow(filter, onSelect = { filter = it }) }
 
                 when {
-                    vm.folderLoading -> item {
+                    vm.scanLoading -> item {
                         Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
                     }
                     files.isEmpty() -> item {
                         Text(
-                            if (vm.folderFiles.isEmpty()) "이 폴더에는 지원하는 문서가 없어요."
+                            if (vm.allFiles.isEmpty()) "기기에서 지원하는 문서를 찾지 못했어요."
                             else "이 유형의 문서가 없어요.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
@@ -291,45 +300,38 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun FolderCard(connected: Boolean, name: String, onPickFolder: () -> Unit) {
+private fun AccessCard(onRequestStorage: () -> Unit) {
     Surface(
-        onClick = onPickFolder,
+        onClick = onRequestStorage,
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = MaterialTheme.colorScheme.primaryContainer,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    if (connected) Icons.Filled.Folder else Icons.Filled.CreateNewFolder,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+                Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (connected) name.ifBlank { "연결된 폴더" } else "다운로드 폴더 연결",
+                    "기기 전체 문서 접근 허용",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
                 Text(
-                    if (connected) "받은 문서를 여기서 바로 · 탭하여 변경"
-                    else "다운로드 등 폴더를 연결하면 받은 문서가 표시돼요",
+                    "허용하면 기기의 모든 PDF·문서를 여기서 바로 볼 수 있어요. 파일은 전송되지 않습니다.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
                 )
             }
-            Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
         }
     }
 }

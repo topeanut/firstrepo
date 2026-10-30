@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 인터넷 권한 없음: 모든 처리는 기기 내에서만 이루어집니다. -->
+    <!-- 기기 전체 문서 접근 (Android 11+). 업로드/전송은 하지 않습니다. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"

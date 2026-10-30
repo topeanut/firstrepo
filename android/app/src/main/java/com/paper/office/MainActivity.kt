@@ -17,7 +17,10 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.os.Build
+import android.provider.Settings
 import com.paper.office.doc.DeviceFiles
+import com.paper.office.doc.DeviceScanner
 import com.paper.office.doc.DocKind
 import com.paper.office.doc.DocRef
 import com.paper.office.doc.DocTypes
@@ -54,6 +57,9 @@ class MainActivity : ComponentActivity() {
             uri?.let { vm.exportPdfTo(it) }
         }
 
+    private val reqRead =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { vm.refreshStorage() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -66,8 +72,31 @@ class MainActivity : ComponentActivity() {
                     onSaveAs = { suggestedName -> createDoc.launch(suggestedName) },
                     onPickFolder = { openTree.launch(null) },
                     onExportPdf = { suggestedName -> createPdf.launch(suggestedName) },
+                    onRequestStorage = { requestStorageAccess() },
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        vm.refreshStorage()
+    }
+
+    private fun requestStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    )
+                )
+            } catch (e: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+        } else {
+            reqRead.launch(android.Manifest.permission.READ_EXTERNAL_STORAGE)
         }
     }
 
@@ -116,6 +145,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // PDF 편집 상태 + 스낵바 메시지
     var pdfEdit by mutableStateOf<PdfEditModel?>(null)
     var toastMessage by mutableStateOf<String?>(null)
+
+    // 기기 전체 문서 접근
+    var hasStorageAccess by mutableStateOf(false)
+        private set
+    var scanLoading by mutableStateOf(false)
+        private set
+    val allFiles: SnapshotStateList<DeviceFiles.Entry> = emptyList<DeviceFiles.Entry>().toMutableStateList()
+
+    /** 권한 상태를 갱신하고, 허용됐는데 목록이 비어 있으면 스캔한다. (설정에서 돌아올 때 호출) */
+    fun refreshStorage() {
+        val granted = DeviceScanner.hasAccess(getApplication())
+        hasStorageAccess = granted
+        if (granted && allFiles.isEmpty() && !scanLoading) scanDevice()
+    }
+
+    fun scanDevice() {
+        if (!DeviceScanner.hasAccess(getApplication())) return
+        scanLoading = true
+        viewModelScope.launch {
+            val list = withContext(Dispatchers.IO) { DeviceScanner.scan() }
+            allFiles.clear()
+            allFiles.addAll(list)
+            scanLoading = false
+        }
+    }
 
     init {
         loadRecents()
