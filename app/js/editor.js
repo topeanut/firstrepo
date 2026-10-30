@@ -1,9 +1,9 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { penSvg, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
+import { penSvg, penLine, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
 import { renderRegion } from "./pdf.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
-import { getBlob, putDoc, putNote, deleteBlob, uid } from "./db.js";
+import { getBlob, putDoc, putNote, deleteBlob, saveStrokes, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
 import { icon } from "./icons.js";
 import { itemElement, positionItem, hitItem, makeImageItem, makeFileItem, openItem } from "./items.js";
@@ -59,6 +59,10 @@ export class Editor {
     this.redoStack = [];
     doc.items ||= [];
     this.byPage = new Map(doc.pages.map((p) => [p.id, []]));
+    // Stroke order (z-order) survives per-stroke storage via a sequence number.
+    this.seq = 0;
+    doc.strokes.forEach((s, i) => (this.seq = Math.max(this.seq, (s.seq ??= i))));
+    this.changed = new Map(); // stroke id -> stroke (saved) or null (deleted) since the last save
     this.urls = new Map();
     this.selected = null;
     for (const s of doc.strokes) this.byPage.get(s.page)?.push(s);
@@ -934,9 +938,11 @@ export class Editor {
   // ---------- strokes, undo ----------
   addStrokes(strokes, notify = true) {
     for (const s of strokes) {
+      s.seq ??= ++this.seq;
       this.doc.strokes.push(s);
       this.byPage.get(s.page).push(s);
       this.addPath(this.pvOf(s.page), s);
+      this.changed.set(s.id, s);
     }
     if (notify) this.afterChange(strokes);
   }
@@ -949,6 +955,7 @@ export class Editor {
       const pv = this.pvOf(s.page);
       pv?.paths.get(s)?.remove();
       pv?.paths.delete(s);
+      this.changed.set(s.id, null);
     }
     if (notify) this.afterChange(strokes);
   }
@@ -1352,10 +1359,23 @@ export class Editor {
     this.drawLive();
   }
 
+  // Intermediate pointer samples. If the browser reports them in a different coordinate space
+  // from the event itself (the last sample must match the event), they are ignored from then on:
+  // mixing the two makes a line zigzag between two tracks and look doubled.
+  samples(e) {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    if (!evs.length || Editor.badSamples) return [e];
+    const last = evs[evs.length - 1];
+    if (Math.abs(last.clientX - e.clientX) > 1.5 || Math.abs(last.clientY - e.clientY) > 1.5) {
+      Editor.badSamples = true;
+      return [e];
+    }
+    return evs;
+  }
+
   addPoint(pv, e) {
     const s = this.active.stroke;
-    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-    for (const ev of evs.length ? evs : [e]) {
+    for (const ev of this.samples(e)) {
       const [x, y] = this.pagePoint(pv, ev);
       const n = s.pts.length;
       if (n && Math.hypot(s.pts[n - 3] - x, s.pts[n - 2] - y) < 0.4) continue;
@@ -1373,7 +1393,19 @@ export class Editor {
       const a = this.active;
       if (!a?.stroke || !a.livePath) return;
       const s = a.stroke;
-      this.setInk(a.livePath, s);
+      if (s.tool === "hl") this.setInk(a.livePath, s);
+      else {
+        // While writing, one path per frame (a d attribute) instead of re-parsing markup; the
+        // pressure-varying runs are built once at pen-up.
+        if (!a.livePen) {
+          a.livePath.textContent = "";
+          a.livePen = document.createElementNS(SVGNS, "path");
+          a.livePath.append(a.livePen);
+        }
+        const { d, w } = penLine(s);
+        a.livePen.setAttribute("d", d);
+        a.livePen.setAttribute("stroke-width", w);
+      }
     });
   }
 
@@ -1469,8 +1501,7 @@ export class Editor {
     if (!a.draw) return;
     e.preventDefault();
     if (this.tool === "eraser" && a.erase) {
-      const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-      for (const ev of evs.length ? evs : [e]) this.queueErase(a.pv, this.pagePoint(a.pv, ev));
+      for (const ev of this.samples(e)) this.queueErase(a.pv, this.pagePoint(a.pv, ev));
     } else if (a.stroke) {
       this.addPoint(a.pv, e);
       this.drawLive();
@@ -1636,7 +1667,7 @@ export class Editor {
     if (!confirm(msg)) return;
     this.closePlayer();
     this.doc.recordings = this.doc.recordings.filter((r) => r !== rec);
-    for (const s of this.doc.strokes) if (s.audio?.rec === rec.id) s.audio = null;
+    for (const s of this.doc.strokes) if (s.audio?.rec === rec.id) (s.audio = null), this.changed.set(s.id, s);
     for (const op of [...this.undoStack, ...this.redoStack]) {
       for (const s of [...(op.strokes || []), ...(op.added || []), ...(op.removed || [])]) if (s.audio?.rec === rec.id) s.audio = null;
     }
@@ -1694,6 +1725,17 @@ export class Editor {
   async saveNow(withThumb = false) {
     clearTimeout(this.saveTimer);
     this.saveTimer = null;
+    // Only changed strokes are written; the first save of an older note moves all its ink into
+    // the strokes store once.
+    if (!this.doc.strokeStore) {
+      await saveStrokes(this.doc.id, new Map(this.doc.strokes.map((s) => [s.id, s])));
+      this.doc.strokeStore = true;
+      this.changed.clear();
+    } else if (this.changed.size) {
+      const changes = this.changed;
+      this.changed = new Map();
+      await saveStrokes(this.doc.id, changes);
+    }
     await putDoc(this.doc);
     const thumb = withThumb ? await makeThumb(this.doc) : this._thumb;
     this._thumb = thumb;

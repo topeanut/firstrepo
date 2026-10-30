@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever app files change.
-const VERSION = "penote-v13";
+const VERSION = "penote-v14";
 const ASSETS = [
   "./",
   "index.html",
@@ -39,10 +39,16 @@ self.addEventListener("activate", (e) => {
 });
 
 // Network first (so updates arrive when online), falling back to the cache offline.
+// "no-cache" revalidates with the server instead of trusting the HTTP cache (GitHub Pages sends
+// max-age=600), so a fresh deploy never mixes new and old modules.
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET" || new URL(e.request.url).origin !== location.origin) return;
+  const req =
+    e.request.mode === "navigate"
+      ? new Request(e.request.url, { cache: "no-cache", credentials: "same-origin" })
+      : new Request(e.request, { cache: "no-cache" });
   e.respondWith(
-    fetch(e.request)
+    fetch(req)
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();

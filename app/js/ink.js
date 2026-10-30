@@ -69,6 +69,22 @@ export function penChunks(s) {
   return chunks;
 }
 
+// The whole stroke as one path at its average width (used while the stroke is being drawn).
+export function penLine(s) {
+  const p = s.pts;
+  const n = p.length / 3;
+  let w = 0;
+  for (let i = 2; i < p.length; i += 3) w += penWidth(s, p[i]);
+  w /= n;
+  if (n === 1) return { d: `M${f(p[0])} ${f(p[1])}l0.01 0`, w: f(w) };
+  let d = `M${f(p[0])} ${f(p[1])}`;
+  for (let k = 1; k < n - 1; k++) {
+    const x = p[k * 3], y = p[k * 3 + 1];
+    d += `Q${f(x)} ${f(y)} ${f((x + p[k * 3 + 3]) / 2)} ${f((y + p[k * 3 + 4]) / 2)}`;
+  }
+  return { d: d + `L${f(p[(n - 1) * 3])} ${f(p[(n - 1) * 3 + 1])}`, w: f(w) };
+}
+
 export const penSvg = (s) => penChunks(s).map((c) => `<path d="${c.d}" stroke-width="${f(c.w)}"/>`).join("");
 
 // Highlighter: a plain polyline stroked at constant width.

@@ -1,7 +1,7 @@
 // App shell: note library (folders, selection, drag to group) and navigation into the editor.
 import {
   listNotes, getDoc, putDoc, putNote, deleteNote, requestPersistence,
-  listFolders, putFolder, deleteFolderRecord, moveNote, uid,
+  listFolders, putFolder, deleteFolderRecord, moveNote, uid, getDocRecord,
 } from "./db.js";
 import { newDoc, newPage, noteMeta } from "./model.js";
 import { makeThumb } from "./render.js";
@@ -434,7 +434,7 @@ async function onLibraryClick(e) {
       if (k === "rename") {
         const name = await askText("노트 이름", note.title, "변경");
         if (name) {
-          const doc = await getDoc(id);
+          const doc = await getDocRecord(id);
           await putDoc({ ...doc, title: name });
           await putNote({ ...note, title: name });
         }
