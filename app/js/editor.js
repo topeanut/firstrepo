@@ -1,6 +1,7 @@
 // Note editor: page views, Apple Pencil input, tools, undo, audio recording/playback sync.
-import { drawStroke, drawStrokes, drawPenRange, hitStroke, bbox, cutStroke } from "./ink.js";
+import { penPath, hlPath, hitStroke, bbox, cutStroke, HL_ALPHA } from "./ink.js";
 import { drawBackground, exportPdf, makeThumb, pageImage } from "./render.js";
+import { renderRegion } from "./pdf.js";
 import { Recorder, Player, fmtTime } from "./audio.js";
 import { getBlob, putDoc, putNote, deleteBlob, uid } from "./db.js";
 import { newPage, noteMeta } from "./model.js";
@@ -13,7 +14,9 @@ const COLOR_NAMES = { "#000000": "검정", "#5f6368": "회색", "#0a63d8": "파�
 const HL_COLORS = ["#ffe03d", "#7ce38b", "#7cc6ff", "#ff8fc7"];
 const PEN_SIZES = [1.6, 2.6, 4.2];
 const HL_SIZES = [12, 20, 30];
-const MAX_CANVAS_PX = 3.5e6; // per canvas; iPad Safari has a tight total canvas memory budget
+const MAX_CANVAS_PX = 4.2e6; // whole-page PDF bitmap; iPad Safari has a tight total canvas memory budget
+const MAX_DETAIL_PX = 6e6; // sharp visible-region PDF bitmap used when zoomed in
+const SVGNS = "http://www.w3.org/2000/svg";
 const ERASER_SIZES = [5, 11, 22];
 
 const prefs = {
@@ -158,8 +161,6 @@ export class Editor {
       this.doc.title = this.titleInput.value.trim() || "제목 없음";
       this.dirty();
     });
-    this.live = document.createElement("canvas");
-    this.live.className = "live";
 
     this.root.addEventListener("click", (e) => {
       const b = e.target.closest("button");
@@ -210,7 +211,11 @@ export class Editor {
     this.root.addEventListener("pointerdown", () => (Editor.focused = this), true);
     this._offTheme = onThemeChange(() => {
       this.renderToolbar();
-      this.pageViews.forEach((pv) => this.release(pv));
+      this.pageViews.forEach((pv) => {
+        if (!pv.rendered) return;
+        pv.needsRender = true;
+        pv.inkBuilt = false;
+      });
       this.updateVisible();
     });
     this._visibility = () => {
@@ -412,15 +417,24 @@ export class Editor {
   // ---------- pages & rendering ----------
   makePageView(page) {
     const el = document.createElement("div");
-    el.className = "page";
+    el.className = "page paper-" + page.bg.type;
     const bg = document.createElement("canvas");
-    const ink = document.createElement("canvas");
     bg.className = "bg";
-    ink.className = "ink";
     const items = document.createElement("div");
     items.className = "items";
-    el.append(bg, items, ink);
-    const pv = { page, el, bg, ink, items, rendered: false, pr: 1 };
+    // Ink is vector (one path per stroke) so it stays sharp at every zoom level and edits
+    // only touch the affected paths.
+    const svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("class", "ink");
+    svg.setAttribute("viewBox", `0 0 ${page.w} ${page.h}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    const gHl = document.createElementNS(SVGNS, "g");
+    gHl.setAttribute("class", "hl");
+    const gPen = document.createElementNS(SVGNS, "g");
+    gPen.setAttribute("class", "pen");
+    svg.append(gHl, gPen);
+    el.append(bg, items, svg);
+    const pv = { page, el, bg, items, svg, gHl, gPen, paths: new Map(), rendered: false, pr: 1 };
     el._pv = pv;
     for (const it of this.doc.items) if (it.page === page.id) items.append(itemElement(it, page, this.urlFor));
     return pv;
@@ -443,21 +457,41 @@ export class Editor {
       pv.cssH = Math.round((cssW * pv.page.h) / pv.page.w);
       pv.el.style.width = cssW + "px";
       pv.el.style.height = pv.cssH + "px";
-      this.release(pv);
+      pv.el.style.setProperty("--step", ((32 * cssW) / pv.page.w).toFixed(3) + "px");
+      // Keep the old bitmaps (CSS stretches them) until sharper ones are ready: no blank flash.
+      if (pv.rendered) pv.needsRender = true;
     }
     this.updateVisible();
+    this.scheduleDetail();
   }
 
-  setZoom(z, focus) {
-    z = Math.min(3, Math.max(0.6, z));
+  clampZoom(z) {
+    return Math.min(3, Math.max(0.6, z));
+  }
+
+  // Zooms so the page point under `focus` (scroller coords) ends up under `to` (default: same spot).
+  // Anchoring to a page, not to raw scroll offsets, keeps centred pages from jumping.
+  setZoom(z, focus, to = focus) {
+    z = this.clampZoom(z);
     const sc = this.scroller;
+    const box = sc.getBoundingClientRect();
     const fx = focus ? focus.x : sc.clientWidth / 2;
     const fy = focus ? focus.y : sc.clientHeight / 2;
-    const cx = (sc.scrollLeft + fx) / this.zoom, cy = (sc.scrollTop + fy) / this.zoom;
+    const tx = to ? to.x : fx, ty = to ? to.y : fy;
+    let pv = this.pageViews[0], best = Infinity;
+    for (const v of this.visiblePages(0)) {
+      const r = v.el.getBoundingClientRect();
+      const d = Math.max(0, r.top - box.top - fy, box.top + fy - r.bottom);
+      if (d < best) (best = d), (pv = v);
+    }
+    if (!pv) return;
+    const r = pv.el.getBoundingClientRect();
+    const u = (box.left + fx - r.left) / r.width, v = (box.top + fy - r.top) / r.height;
     this.zoom = z;
     this.layout();
-    sc.scrollLeft = cx * z - fx;
-    sc.scrollTop = cy * z - fy;
+    const r2 = pv.el.getBoundingClientRect();
+    sc.scrollLeft += r2.left + u * r2.width - (box.left + tx);
+    sc.scrollTop += r2.top + v * r2.height - (box.top + ty);
     this.updateVisible();
   }
 
@@ -473,7 +507,7 @@ export class Editor {
     const keep = new Set(this.visiblePages(h * 2.5));
     for (const pv of this.pageViews) {
       if (near.has(pv)) {
-        if (!pv.rendered) this.renderPage(pv);
+        if (!pv.rendered || pv.needsRender) this.renderPage(pv);
       } else if (pv.rendered && !keep.has(pv)) this.release(pv);
     }
     this.updateIndicator();
@@ -613,23 +647,115 @@ export class Editor {
 
   release(pv) {
     pv.rendered = false;
-    pv.bg.width = pv.bg.height = pv.ink.width = pv.ink.height = 0;
+    pv.needsRender = false;
+    pv.bgKey = null;
+    pv.token = (pv.token || 0) + 1;
+    pv.bg.width = pv.bg.height = 0;
+    this.dropDetail(pv);
+    pv.gHl.textContent = pv.gPen.textContent = "";
+    pv.paths.clear();
+    pv.inkBuilt = false;
   }
 
+  // Renders a page. Ink paths are built once and then edited incrementally. Lined/grid/blank
+  // paper is pure CSS. PDF pages get a whole-page bitmap drawn off-screen and swapped in when
+  // done (no blank flash on zoom), plus a sharp visible-region bitmap when zoomed in.
   async renderPage(pv) {
     pv.rendered = true;
+    pv.needsRender = false;
+    const token = (pv.token = (pv.token || 0) + 1);
+    pv.el.classList.toggle("dark", this.pageDark(pv));
+    if (!pv.inkBuilt) this.buildInk(pv);
+    if (pv.page.bg.type !== "pdf") return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const pr = Math.min(dpr, Math.sqrt(MAX_CANVAS_PX / (pv.cssW * pv.cssH)));
     pv.pr = pr;
-    for (const c of [pv.bg, pv.ink]) {
-      c.width = Math.round(pv.cssW * pr);
-      c.height = Math.round(pv.cssH * pr);
+    const W = Math.round(pv.cssW * pr), H = Math.round(pv.cssH * pr);
+    const inverted = isDark() && darkPdf();
+    pv.el.classList.toggle("inverted", inverted);
+    const key = `${W}x${H}`;
+    if (pv.bgKey === key && pv.bg.width) return this.scheduleDetail();
+    const fresh = !pv.bg.width;
+    const off = document.createElement("canvas");
+    off.width = W;
+    off.height = H;
+    await drawBackground(off, pv.page, isDark());
+    if (token !== pv.token || !pv.rendered) {
+      off.width = off.height = 0;
+      return;
     }
-    const isPdf = pv.page.bg.type === "pdf";
-    pv.bg.classList.toggle("inverted", isPdf && isDark() && darkPdf());
-    pv.el.classList.toggle("dark", this.pageDark(pv));
-    this.redrawInk(pv);
-    await drawBackground(pv.bg, pv.page, isDark());
+    off.className = "bg" + (fresh ? " fresh" : "");
+    const old = pv.bg;
+    old.replaceWith(off);
+    old.width = old.height = 0;
+    pv.bg = off;
+    pv.bgKey = key;
+    this.scheduleDetail();
+  }
+
+  // ----- sharp PDF detail when zoomed in -----
+  scheduleDetail() {
+    clearTimeout(this._detailT);
+    this._detailT = setTimeout(() => this.updateDetail(), 140);
+  }
+
+  dropDetail(pv) {
+    pv.detailTask?.cancel();
+    pv.detailTask = null;
+    if (pv.detail) {
+      pv.detail.el.width = pv.detail.el.height = 0;
+      pv.detail.el.remove();
+      pv.detail = null;
+    }
+  }
+
+  updateDetail() {
+    if (this.active || !this.scroller) return this.scheduleDetail();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const box = this.scroller.getBoundingClientRect();
+    const visible = new Set(this.visiblePages(0));
+    for (const pv of this.pageViews) {
+      if (!visible.has(pv) || pv.page.bg.type !== "pdf" || !pv.rendered || !pv.bg.width || pv.pr >= dpr * 0.92) {
+        if (pv.detail || pv.detailTask) this.dropDetail(pv);
+        continue;
+      }
+      const r = pv.el.getBoundingClientRect();
+      const vx0 = Math.max(0, box.left - r.left), vy0 = Math.max(0, box.top - r.top);
+      const vx1 = Math.min(r.width, box.right - r.left), vy1 = Math.min(r.height, box.bottom - r.top);
+      if (vx1 <= vx0 || vy1 <= vy0) continue;
+      const d = pv.detail;
+      if (d && d.zoom === this.zoom && d.x0 <= vx0 && d.y0 <= vy0 && d.x1 >= vx1 && d.y1 >= vy1) continue;
+      // Visible part plus a margin so small scrolls stay sharp, within the pixel budget.
+      let mx = (vx1 - vx0) * 0.25, my = (vy1 - vy0) * 0.25;
+      while (mx > 1 && (vx1 - vx0 + 2 * mx) * (vy1 - vy0 + 2 * my) * dpr * dpr > MAX_DETAIL_PX) (mx /= 2), (my /= 2);
+      const x0 = Math.max(0, vx0 - mx), y0 = Math.max(0, vy0 - my);
+      const x1 = Math.min(r.width, vx1 + mx), y1 = Math.min(r.height, vy1 + my);
+      const c = document.createElement("canvas");
+      c.width = Math.round((x1 - x0) * dpr);
+      c.height = Math.round((y1 - y0) * dpr);
+      if (c.width * c.height > MAX_DETAIL_PX * 1.05) continue;
+      pv.detailTask?.cancel();
+      const zoom = this.zoom;
+      const task = (pv.detailTask = renderRegion(pv.page.bg.pdf, pv.page.bg.page, c, r.width * dpr, x0 * dpr, y0 * dpr));
+      task.promise.then((ok) => {
+        if (!ok || pv.detailTask !== task || !pv.rendered || zoom !== this.zoom) {
+          c.width = c.height = 0;
+          return;
+        }
+        pv.detailTask = null;
+        c.className = "detail";
+        Object.assign(c.style, {
+          left: (x0 / r.width) * 100 + "%",
+          top: (y0 / r.height) * 100 + "%",
+          width: ((x1 - x0) / r.width) * 100 + "%",
+          height: ((y1 - y0) / r.height) * 100 + "%",
+        });
+        const old = pv.detail?.el;
+        pv.bg.after(c);
+        if (old) (old.width = old.height = 0), old.remove();
+        pv.detail = { el: c, zoom, x0, y0, x1, y1 };
+      }, () => (c.width = c.height = 0));
+    }
   }
 
   fadedFn() {
@@ -644,15 +770,49 @@ export class Editor {
     return isDark() && (pv.page.bg.type !== "pdf" || darkPdf());
   }
 
-  redrawInk(pv) {
-    if (!pv.rendered) return;
-    const ctx = pv.ink.getContext("2d");
-    ctx.clearRect(0, 0, pv.ink.width, pv.ink.height);
-    drawStrokes(ctx, this.byPage.get(pv.page.id) || [], pv.ink.width / pv.page.w, this.fadedFn(), this.pageDark(pv) ? darkInk : null);
+  makePath(pv, s) {
+    const path = document.createElementNS(SVGNS, "path");
+    const color = this.pageDark(pv) ? darkInk(s.color) : s.color;
+    if (s.tool === "hl") {
+      path.setAttribute("d", hlPath(s));
+      path.setAttribute("stroke", color);
+      path.setAttribute("stroke-width", s.width);
+      path.setAttribute("opacity", HL_ALPHA);
+    } else {
+      path.setAttribute("d", penPath(s));
+      path.setAttribute("fill", color);
+    }
+    return path;
   }
 
+  addPath(pv, s) {
+    if (!pv?.inkBuilt || pv.paths.has(s)) return;
+    const path = this.makePath(pv, s);
+    const faded = this.fadedFn();
+    if (faded?.(s)) path.classList.add("faded");
+    (s.tool === "hl" ? pv.gHl : pv.gPen).append(path);
+    pv.paths.set(s, path);
+  }
+
+  buildInk(pv) {
+    pv.gHl.textContent = pv.gPen.textContent = "";
+    pv.paths.clear();
+    pv.inkBuilt = true;
+    for (const s of this.byPage.get(pv.page.id) || []) this.addPath(pv, s);
+  }
+
+  // Full rebuild (theme change); normal edits update single paths.
+  redrawInk(pv) {
+    if (pv.rendered) this.buildInk(pv);
+  }
+
+  // Replay: grey out ink written after the playback position (class toggles only).
   redrawVisible() {
-    for (const pv of this.pageViews) if (pv.rendered) this.redrawInk(pv);
+    const faded = this.fadedFn();
+    for (const pv of this.pageViews) {
+      if (!pv.inkBuilt) continue;
+      for (const [s, path] of pv.paths) path.classList.toggle("faded", !!faded?.(s));
+    }
   }
 
   pvOf(pageId) {
@@ -673,43 +833,31 @@ export class Editor {
   }
 
   // ---------- strokes, undo ----------
-  addStrokes(strokes, redraw = true) {
+  addStrokes(strokes, notify = true) {
     for (const s of strokes) {
       this.doc.strokes.push(s);
       this.byPage.get(s.page).push(s);
+      this.addPath(this.pvOf(s.page), s);
     }
-    if (redraw) this.afterChange(strokes);
+    if (notify) this.afterChange(strokes);
   }
-  removeStrokes(strokes, redraw = true) {
+  removeStrokes(strokes, notify = true) {
     const set = new Set(strokes);
     this.doc.strokes = this.doc.strokes.filter((s) => !set.has(s));
     for (const s of strokes) {
       const arr = this.byPage.get(s.page);
       arr.splice(arr.indexOf(s), 1);
+      const pv = this.pvOf(s.page);
+      pv?.paths.get(s)?.remove();
+      pv?.paths.delete(s);
     }
-    if (redraw) this.afterChange(strokes);
+    if (notify) this.afterChange(strokes);
   }
   afterChange(strokes) {
-    for (const id of new Set(strokes.map((s) => s.page))) {
-      this.scheduleRedraw(id);
-      this.staleThumb(id);
-    }
+    for (const id of new Set(strokes.map((s) => s.page))) this.staleThumb(id);
     this.dirty();
   }
 
-  // Coalesces ink redraws to one per page per animation frame.
-  scheduleRedraw(pageId) {
-    (this._redraw ||= new Set()).add(pageId);
-    if (this._redrawRaf) return;
-    this._redrawRaf = requestAnimationFrame(() => {
-      this._redrawRaf = 0;
-      for (const id of this._redraw) {
-        const pv = this.pvOf(id);
-        if (pv) this.redrawInk(pv);
-      }
-      this._redraw.clear();
-    });
-  }
   pushUndo(op) {
     this.undoStack.push(op);
     if (this.undoStack.length > 200) this.undoStack.shift();
@@ -912,6 +1060,7 @@ export class Editor {
       if (!raf) raf = requestAnimationFrame(() => ((raf = 0), this.updateVisible()));
       clearTimeout(this._viewT);
       this._viewT = setTimeout(() => this.saveView(), 1000);
+      this.scheduleDetail();
     });
 
     this.pagesEl.addEventListener("pointerdown", (e) => this.onDown(e));
@@ -952,35 +1101,48 @@ export class Editor {
     });
     this.$(".body").addEventListener("touchcancel", () => (g = null));
 
-    // Pinch zoom with two fingers.
+    // Pinch zoom with two fingers: the pages follow the fingers (scale + pan) with a cheap CSS
+    // transform, then the zoom is committed anchored to the same page point.
     let pinch = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const mid = (t, r) => ({ x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top });
     sc.addEventListener("touchstart", (e) => {
       if (e.touches.length === 2 && ![...e.touches].some((t) => t.touchType === "stylus")) {
         this.cancelStroke();
         const r = sc.getBoundingClientRect();
-        pinch = {
-          d: dist(e.touches),
-          x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-          y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
-          k: 1,
-        };
-        this.pagesEl.style.transformOrigin = `${sc.scrollLeft + pinch.x}px ${sc.scrollTop + pinch.y}px`;
+        const m = mid(e.touches, r);
+        pinch = { d: dist(e.touches), x: m.x, y: m.y, mx: m.x, my: m.y, k: 1 };
+        this.pagesEl.style.transformOrigin = `${sc.scrollLeft + m.x}px ${sc.scrollTop + m.y}px`;
+        this.pagesEl.style.willChange = "transform";
       }
     });
     sc.addEventListener("touchmove", (e) => {
-      if (pinch && e.touches.length === 2) {
-        e.preventDefault();
-        pinch.k = dist(e.touches) / pinch.d;
-        this.pagesEl.style.transform = `scale(${pinch.k})`;
+      if (!pinch || e.touches.length !== 2) return;
+      e.preventDefault();
+      const m = mid(e.touches, sc.getBoundingClientRect());
+      pinch.k = this.clampZoom((this.zoom * dist(e.touches)) / pinch.d) / this.zoom;
+      pinch.mx = m.x;
+      pinch.my = m.y;
+      if (!pinch.raf) {
+        pinch.raf = requestAnimationFrame(() => {
+          if (!pinch) return;
+          pinch.raf = 0;
+          this.pagesEl.style.transform = `translate3d(${pinch.mx - pinch.x}px, ${pinch.my - pinch.y}px, 0) scale(${pinch.k})`;
+        });
       }
     }, { passive: false });
     const endPinch = () => {
       if (!pinch) return;
       const p = pinch;
       pinch = null;
+      cancelAnimationFrame(p.raf);
       this.pagesEl.style.transform = "";
-      if (Math.abs(p.k - 1) > 0.03) this.setZoom(this.zoom * p.k, p);
+      this.pagesEl.style.willChange = "";
+      if (Math.abs(p.k - 1) > 0.01) this.setZoom(this.zoom * p.k, { x: p.x, y: p.y }, { x: p.mx, y: p.my });
+      else {
+        sc.scrollLeft -= p.mx - p.x;
+        sc.scrollTop -= p.my - p.y;
+      }
     };
     sc.addEventListener("touchend", (e) => e.touches.length < 2 && endPinch());
     sc.addEventListener("touchcancel", endPinch);
@@ -1028,9 +1190,6 @@ export class Editor {
     } catch {}
     if (this.tool === "eraser") {
       this.active.erase = { removed: [], added: new Set() };
-      this.live.width = pv.ink.width;
-      this.live.height = pv.ink.height;
-      pv.el.appendChild(this.live);
       this.eraseAt(pv, this.pagePoint(pv, e));
       return;
     }
@@ -1046,9 +1205,9 @@ export class Editor {
     };
     this.active.stroke = s;
     this.addPoint(pv, e);
-    this.live.width = pv.ink.width;
-    this.live.height = pv.ink.height;
-    pv.el.appendChild(this.live);
+    if (!pv.inkBuilt) this.buildInk(pv);
+    this.active.livePath = this.makePath(pv, s);
+    (hl ? pv.gHl : pv.gPen).append(this.active.livePath);
     this.drawLive();
   }
 
@@ -1065,32 +1224,15 @@ export class Editor {
     }
   }
 
+  // Updates the in-progress stroke once per frame (vector, so it is as sharp as the final ink).
   drawLive() {
     if (this._liveRaf) return;
     this._liveRaf = requestAnimationFrame(() => {
       this._liveRaf = 0;
       const a = this.active;
-      if (!a?.stroke) return;
-      const ctx = this.live.getContext("2d");
-      const s = a.stroke;
-      const scale = this.live.width / a.pv.page.w;
-      const color = this.pageDark(a.pv) ? darkInk : null;
-      const n = s.pts.length / 3;
-      if (s.tool === "hl" || n < 3) {
-        // Highlighter is translucent, so it is redrawn as one path.
-        ctx.clearRect(0, 0, this.live.width, this.live.height);
-        drawStroke(ctx, s, scale, false, color);
-        a.liveDone = 0;
-        return;
-      }
-      // Pen: only draw segments that became final since the last frame.
-      if (!a.liveDone) ctx.clearRect(0, 0, this.live.width, this.live.height);
-      ctx.save();
-      ctx.lineCap = ctx.lineJoin = "round";
-      ctx.strokeStyle = color ? color(s.color) : s.color;
-      drawPenRange(ctx, s, scale, (a.liveDone || 0) + 1, n - 2);
-      ctx.restore();
-      a.liveDone = n - 2;
+      if (!a?.stroke || !a.livePath) return;
+      const s = a.pred?.length ? { ...a.stroke, pts: a.stroke.pts.concat(...a.pred) } : a.stroke;
+      a.livePath.setAttribute("d", s.tool === "hl" ? hlPath(s) : penPath(s));
     });
   }
 
@@ -1117,20 +1259,21 @@ export class Editor {
     if (added.length) this.addStrokes(added, false);
     for (const s of removed) er.added.has(s) ? er.added.delete(s) : er.removed.push(s);
     for (const s of added) er.added.add(s);
-    this.afterChange([...removed, ...added]);
+    this.staleThumb(pv.page.id);
+    this.dirty();
   }
 
   drawEraserCursor(pv, x, y, r) {
-    const ctx = this.live.getContext("2d");
-    const k = this.live.width / pv.page.w;
-    ctx.clearRect(0, 0, this.live.width, this.live.height);
-    ctx.beginPath();
-    ctx.arc(x * k, y * k, r * k, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(120,120,120,0.12)";
-    ctx.fill();
-    ctx.lineWidth = Math.max(1, k);
-    ctx.strokeStyle = "rgba(90,90,90,0.7)";
-    ctx.stroke();
+    let c = this.active?.cursor;
+    if (!c) {
+      c = document.createElementNS(SVGNS, "circle");
+      c.setAttribute("class", "eraser-cursor");
+      pv.svg.append(c);
+      if (this.active) this.active.cursor = c;
+    }
+    c.setAttribute("cx", x);
+    c.setAttribute("cy", y);
+    c.setAttribute("r", r);
   }
 
   onMove(e) {
@@ -1149,6 +1292,10 @@ export class Editor {
       for (const ev of evs.length ? evs : [e]) this.eraseAt(a.pv, this.pagePoint(a.pv, ev));
     } else if (a.stroke) {
       this.addPoint(a.pv, e);
+      // Predicted points (where supported) are shown but never stored: the line keeps up with the
+      // pen tip instead of trailing a frame behind.
+      const pred = e.getPredictedEvents?.() || [];
+      a.pred = pred.slice(0, 2).map((ev) => [...this.pagePoint(a.pv, ev), ev.pressure || 0.5]);
       this.drawLive();
     }
   }
@@ -1157,7 +1304,8 @@ export class Editor {
     const a = this.active;
     if (!a || a.id !== e.pointerId) return;
     this.active = null;
-    this.live.remove();
+    a.cursor?.remove();
+    if (a.livePath && (cancelled || !a.stroke?.pts.length)) a.livePath.remove();
     const quickTap = !a.moved && performance.now() - a.t0 < 350;
     if (a.item) {
       if (cancelled) {
@@ -1166,7 +1314,10 @@ export class Editor {
       } else this.onItemUp(a);
       return;
     }
-    if (!cancelled && quickTap && this.player.recording && this.seekToInk(a.pv, this.pagePoint(a.pv, e))) return;
+    if (!cancelled && quickTap && this.player.recording && this.seekToInk(a.pv, this.pagePoint(a.pv, e))) {
+      a.livePath?.remove();
+      return;
+    }
     // Finger tap on an attached file opens it.
     if (!cancelled && quickTap && !a.draw) {
       const [x, y] = this.pagePoint(a.pv, e);
@@ -1182,10 +1333,10 @@ export class Editor {
     }
     if (a.stroke && a.stroke.pts.length) {
       const s = a.stroke;
+      // The live path becomes the stroke's path: nothing is redrawn.
+      a.livePath.setAttribute("d", s.tool === "hl" ? hlPath(s) : penPath(s));
+      a.pv.paths.set(s, a.livePath);
       this.addStrokes([s], false);
-      if (s.tool === "pen" && a.pv.rendered && !this.fadedFn()?.(s)) {
-        drawStroke(a.pv.ink.getContext("2d"), s, a.pv.ink.width / a.pv.page.w, false, this.pageDark(a.pv) ? darkInk : null);
-      } else this.scheduleRedraw(s.page);
       this.staleThumb(s.page);
       this.dirty();
       this.pushUndo({ type: "add", strokes: [s] });
@@ -1194,7 +1345,7 @@ export class Editor {
 
   cancelStroke() {
     if (this.active?.stroke) {
-      this.live.remove();
+      this.active.livePath?.remove();
       this.active = null;
     }
   }
@@ -1368,6 +1519,7 @@ export class Editor {
     this.player.close();
     await this.saveNow(true);
     this._ro.disconnect();
+    clearTimeout(this._detailT);
     clearTimeout(this._roT);
     window.removeEventListener("pointermove", this._move);
     window.removeEventListener("pointerup", this._up);
