@@ -29,7 +29,7 @@ function apply() {
   if (t === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.dataset.theme = t;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = isDark() ? "#1b1c1f" : "#f4f1ea";
+  if (meta) meta.content = isDark() ? "#141416" : "#f2f2f6";
   listeners.forEach((fn) => fn());
 }
 

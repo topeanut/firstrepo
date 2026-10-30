@@ -43,6 +43,7 @@ export const getDoc = (id) => tx("docs", "readonly", (s) => s.get(id));
 export const putDoc = (doc) => tx("docs", "readwrite", (s) => s.put(doc));
 export const getBlob = (key) => tx("blobs", "readonly", (s) => s.get(key));
 export const putBlob = (key, blob) => tx("blobs", "readwrite", (s) => s.put(blob, key));
+export const deleteBlob = (key) => tx("blobs", "readwrite", (s) => s.delete(key));
 
 export async function deleteNote(id) {
   const doc = await getDoc(id);
