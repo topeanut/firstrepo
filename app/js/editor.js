@@ -445,13 +445,17 @@ export class Editor {
     return this.urls.get(key);
   };
 
+  // Page width at zoom 1. The pages container's padding and gaps scale with zoom (--z), so the
+  // whole layout is linear in zoom apart from horizontal centring — which lets a pinch preview
+  // (a CSS transform) match the committed layout exactly.
   baseWidth() {
-    return Math.min(this.scroller.clientWidth - 24, 1100);
+    return Math.min(this.scroller.clientWidth - 32, 1100);
   }
 
   layout() {
     const cssW = Math.round(this.baseWidth() * this.zoom);
     this.cssW = cssW;
+    this.pagesEl.style.setProperty("--z", this.zoom);
     for (const pv of this.pageViews) {
       pv.cssW = cssW;
       pv.cssH = Math.round((cssW * pv.page.h) / pv.page.w);
@@ -463,6 +467,15 @@ export class Editor {
     }
     this.updateVisible();
     this.scheduleDetail();
+  }
+
+  holdRender(ms = 260) {
+    this._hold = true;
+    clearTimeout(this._holdT);
+    this._holdT = setTimeout(() => {
+      this._hold = false;
+      this.updateVisible();
+    }, ms);
   }
 
   clampZoom(z) {
@@ -488,6 +501,7 @@ export class Editor {
     const r = pv.el.getBoundingClientRect();
     const u = (box.left + fx - r.left) / r.width, v = (box.top + fy - r.top) / r.height;
     this.zoom = z;
+    this.holdRender();
     this.layout();
     const r2 = pv.el.getBoundingClientRect();
     sc.scrollLeft += r2.left + u * r2.width - (box.left + tx);
@@ -507,7 +521,9 @@ export class Editor {
     const keep = new Set(this.visiblePages(h * 2.5));
     for (const pv of this.pageViews) {
       if (near.has(pv)) {
-        if (!pv.rendered || pv.needsRender) this.renderPage(pv);
+        // Right after a zoom, re-rendering waits a moment (the stretched bitmap and vector ink
+        // look fine) so the gesture's last frames stay smooth.
+        if (!pv.rendered || (pv.needsRender && !this._hold)) this.renderPage(pv);
       } else if (pv.rendered && !keep.has(pv)) this.release(pv);
     }
     this.updateIndicator();
@@ -679,8 +695,10 @@ export class Editor {
     const off = document.createElement("canvas");
     off.width = W;
     off.height = H;
-    await drawBackground(off, pv.page, isDark());
-    if (token !== pv.token || !pv.rendered) {
+    // One PDF render at a time (pdf.js paints on the main thread); skip work that went stale.
+    const job = async () => token === pv.token && pv.rendered && (await drawBackground(off, pv.page, isDark()), true);
+    const ran = await (this._bgQ = (this._bgQ || Promise.resolve()).then(job, job));
+    if (!ran || token !== pv.token || !pv.rendered) {
       off.width = off.height = 0;
       return;
     }
@@ -696,7 +714,7 @@ export class Editor {
   // ----- sharp PDF detail when zoomed in -----
   scheduleDetail() {
     clearTimeout(this._detailT);
-    this._detailT = setTimeout(() => this.updateDetail(), 140);
+    this._detailT = setTimeout(() => this.updateDetail(), 260);
   }
 
   dropDetail(pv) {
@@ -710,7 +728,7 @@ export class Editor {
   }
 
   updateDetail() {
-    if (this.active || !this.scroller) return this.scheduleDetail();
+    if (this.active || this._hold || !this.scroller) return this.scheduleDetail();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const box = this.scroller.getBoundingClientRect();
     const visible = new Set(this.visiblePages(0));
@@ -1101,21 +1119,51 @@ export class Editor {
     });
     this.$(".body").addEventListener("touchcancel", () => (g = null));
 
-    // Pinch zoom with two fingers: the pages follow the fingers (scale + pan) with a cheap CSS
-    // transform, then the zoom is committed anchored to the same page point.
+    // Pinch zoom. While fingers move, the pages get a CSS transform computed from the exact
+    // layout the zoom will produce (including centring and scroll clamping), so releasing the
+    // fingers commits to precisely what is on screen: no jump, no flash.
     let pinch = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const mid = (t, r) => ({ x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top });
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+    const startPinch = (touches) => {
+      const box = sc.getBoundingClientRect();
+      const m = mid(touches, box);
+      let pv = null, best = Infinity;
+      for (const v of this.visiblePages(0)) {
+        const r = v.el.getBoundingClientRect();
+        const d = Math.max(0, r.top - box.top - m.y, box.top + m.y - r.bottom);
+        if (d < best) (best = d), (pv = v);
+      }
+      if (!pv) return null;
+      const r = pv.el.getBoundingClientRect();
+      return {
+        d: dist(touches), k: 1, mx: m.x, my: m.y,
+        u: (box.left + m.x - r.left) / r.width, v: (box.top + m.y - r.top) / r.height,
+        W: r.width, H: r.height,
+        left: r.left - box.left + sc.scrollLeft, top: r.top - box.top + sc.scrollTop,
+        Wc: this.cssW + 32 * this.zoom, cw: sc.clientWidth, ch: sc.clientHeight,
+        sh: sc.scrollHeight, pad: parseFloat(getComputedStyle(this.pagesEl).paddingBottom) || 0,
+        sl: sc.scrollLeft, st: sc.scrollTop,
+      };
+    };
+    // Where the layout and scroll position will be at scale k with the anchor under (mx, my).
+    const target = (p) => {
+      const k = p.k, W2 = p.W * k, cw2 = Math.max(p.cw, p.Wc * k);
+      const left2 = (cw2 - W2) / 2;
+      const sl = clamp(left2 + p.u * W2 - p.mx, 0, cw2 - p.cw);
+      const st = clamp(p.top * k + p.v * p.H * k - p.my, 0, (p.sh - p.pad) * k + p.pad - p.ch);
+      return { sl, st, tx: left2 - p.left * k - sl + p.sl, ty: p.st - st };
+    };
     sc.addEventListener("touchstart", (e) => {
       if (e.touches.length === 2 && ![...e.touches].some((t) => t.touchType === "stylus")) {
         this.cancelStroke();
-        const r = sc.getBoundingClientRect();
-        const m = mid(e.touches, r);
-        pinch = { d: dist(e.touches), x: m.x, y: m.y, mx: m.x, my: m.y, k: 1 };
-        this.pagesEl.style.transformOrigin = `${sc.scrollLeft + m.x}px ${sc.scrollTop + m.y}px`;
+        pinch = startPinch(e.touches);
+        if (!pinch) return;
+        this.pagesEl.style.transformOrigin = "0 0";
         this.pagesEl.style.willChange = "transform";
       }
-    });
+    }, { passive: true });
     sc.addEventListener("touchmove", (e) => {
       if (!pinch || e.touches.length !== 2) return;
       e.preventDefault();
@@ -1127,7 +1175,8 @@ export class Editor {
         pinch.raf = requestAnimationFrame(() => {
           if (!pinch) return;
           pinch.raf = 0;
-          this.pagesEl.style.transform = `translate3d(${pinch.mx - pinch.x}px, ${pinch.my - pinch.y}px, 0) scale(${pinch.k})`;
+          const t = target(pinch);
+          this.pagesEl.style.transform = `translate3d(${t.tx}px, ${t.ty}px, 0) scale(${pinch.k})`;
         });
       }
     }, { passive: false });
@@ -1136,13 +1185,18 @@ export class Editor {
       const p = pinch;
       pinch = null;
       cancelAnimationFrame(p.raf);
+      const t = target(p);
+      if (Math.abs(p.k - 1) > 0.005) {
+        this.zoom = this.clampZoom(this.zoom * p.k);
+        this.holdRender();
+        this.layout();
+      }
+      sc.scrollLeft = t.sl;
+      sc.scrollTop = t.st;
       this.pagesEl.style.transform = "";
       this.pagesEl.style.willChange = "";
-      if (Math.abs(p.k - 1) > 0.01) this.setZoom(this.zoom * p.k, { x: p.x, y: p.y }, { x: p.mx, y: p.my });
-      else {
-        sc.scrollLeft -= p.mx - p.x;
-        sc.scrollTop -= p.my - p.y;
-      }
+      this.updateVisible();
+      this.scheduleDetail();
     };
     sc.addEventListener("touchend", (e) => e.touches.length < 2 && endPinch());
     sc.addEventListener("touchcancel", endPinch);

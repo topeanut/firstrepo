@@ -274,6 +274,11 @@ function bindDivider(divider) {
 }
 
 root.addEventListener("click", onLibraryClick);
+// iPad Safari has its own page-level pinch zoom (it ignores user-scalable=no); stop it so it
+// never fights the app's zoom.
+for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+  document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
 requestPersistence();
 showLibrary();
 
