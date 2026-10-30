@@ -10,9 +10,9 @@ export function newPage(type = "lined") {
   return { id: uid(), w: PAGE_W, h: PAGE_W * PAPER_RATIO, bg: { type } };
 }
 
-export function newDoc(title = "새 노트") {
+export function newDoc(title = "새 노트", folder = null) {
   const now = Date.now();
-  return { id: uid(), title, created: now, modified: now, pages: [], strokes: [], recordings: [], nextRec: 1 };
+  return { id: uid(), title, folder, created: now, modified: now, pages: [], strokes: [], recordings: [], nextRec: 1 };
 }
 
 export function noteMeta(doc, thumb) {
@@ -23,6 +23,7 @@ export function noteMeta(doc, thumb) {
     modified: doc.modified,
     pageCount: doc.pages.length,
     hasAudio: doc.recordings.length > 0,
+    folder: doc.folder || null,
     thumb,
   };
 }

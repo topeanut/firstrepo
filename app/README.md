@@ -13,6 +13,7 @@ Penote is a handwriting note app for iPad and the web. It is a static web app (P
 - Notability `.note` import: handwriting, PDFs, recordings and the ink-to-audio sync (see `../notability/FORMAT.md`)
 - PDF export via the iPad share sheet
 - Dark mode: light by default; it can be set to dark or to follow the iPad appearance. Paper and ink adapt, and PDFs can optionally be darkened too. Exported PDFs always stay light.
+- Folders: create nested folders, give them colours, move notes by menu or by long-pressing a note and dropping it on a folder. Select several notes to move them or group them into a new folder. Search across all notes. The browser/back gesture walks back through folders and out of notes.
 - Works offline: everything is stored locally in IndexedDB
 
 ## Install on iPad

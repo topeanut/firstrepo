@@ -14,7 +14,7 @@ const COLOR_NAMES = { "#000000": "검정", "#5f6368": "회색", "#0a63d8": "파�
 const HL_COLORS = ["#ffe03d", "#7ce38b", "#7cc6ff", "#ff8fc7"];
 const PEN_SIZES = [1.6, 2.6, 4.2];
 const HL_SIZES = [12, 20, 30];
-const MAX_CANVAS_PX = 4.2e6; // whole-page PDF bitmap; iPad Safari has a tight total canvas memory budget
+const MAX_CANVAS_PX = 3e6; // whole-page PDF bitmap (detail layer adds sharpness when zoomed); iPad canvas memory is tight
 const MAX_DETAIL_PX = 6e6; // sharp visible-region PDF bitmap used when zoomed in
 const SVGNS = "http://www.w3.org/2000/svg";
 const ERASER_SIZES = [5, 11, 22];
@@ -89,10 +89,13 @@ export class Editor {
           <input class="title-input" value="" aria-label="노트 제목" />
         </div>
         <div class="tb-group tools">
-          <button class="icon-btn tool" data-tool="pen" title="펜">${icon("pen")}</button>
-          <button class="icon-btn tool" data-tool="hl" title="형광펜">${icon("hl")}</button>
-          <button class="icon-btn tool" data-tool="eraser" title="지우개">${icon("eraser")}</button>
-          <button class="icon-btn tool" data-tool="select" title="선택·이동 (첨부 옮기기)">${icon("select")}</button>
+          <div class="tool-seg" role="group" aria-label="도구">
+            <span class="tool-ind" aria-hidden="true"></span>
+            <button class="icon-btn tool" data-tool="pen" title="펜">${icon("pen")}</button>
+            <button class="icon-btn tool" data-tool="hl" title="형광펜">${icon("hl")}</button>
+            <button class="icon-btn tool" data-tool="eraser" title="지우개">${icon("eraser")}</button>
+            <button class="icon-btn tool" data-tool="select" title="선택·이동 (첨부 옮기기)">${icon("select")}</button>
+          </div>
           <span class="sep"></span>
           <span class="swatches"></span>
           <span class="sizes"></span>
@@ -183,6 +186,7 @@ export class Editor {
       });
     }
     this.renderToolbar();
+    this.updateUndoUI();
 
     this.pageViews = this.doc.pages.map((p) => this.makePageView(p));
     this.pageViews.forEach((pv) => this.pagesEl.appendChild(pv.el));
@@ -229,6 +233,7 @@ export class Editor {
   renderToolbar() {
     const $ = this.$;
     this.root.querySelectorAll(".tool").forEach((b) => b.classList.toggle("on", b.dataset.tool === this.tool));
+    this.moveToolIndicator();
     const sw = $(".swatches");
     const sz = $(".sizes");
     this.scroller?.classList.toggle("select-mode", this.tool === "select");
@@ -259,6 +264,17 @@ export class Editor {
     $('[data-act="split-menu"]').textContent = this.isSplit() ? "분할 화면 닫기" : "화면 분할 (노트 2개 같이 보기)";
     $('[data-act="split"]').classList.toggle("on", this.isSplit());
     $('[data-act="dark-pdf"]').textContent = (darkPdf() ? "✓ " : "") + "다크 모드에서 PDF도 어둡게";
+  }
+
+  // The highlight behind the active tool slides between tools.
+  moveToolIndicator() {
+    const seg = this.$(".tool-seg");
+    const on = seg?.querySelector(".tool.on");
+    const ind = seg?.querySelector(".tool-ind");
+    if (!on || !ind) return;
+    if (!on.offsetWidth) return requestAnimationFrame(() => this.moveToolIndicator());
+    ind.style.width = on.offsetWidth + "px";
+    ind.style.transform = `translateX(${on.offsetLeft}px)`;
   }
 
   setTool(t) {
@@ -517,8 +533,10 @@ export class Editor {
 
   updateVisible() {
     const h = this.scroller.clientHeight;
-    const near = new Set(this.visiblePages(h));
-    const keep = new Set(this.visiblePages(h * 2.5));
+    // Render a screen and a half around the viewport so zooming out or scrolling reveals pages
+    // that are already drawn; release only well beyond that.
+    const near = new Set(this.visiblePages(h * 1.5));
+    const keep = new Set(this.visiblePages(h * 3));
     for (const pv of this.pageViews) {
       if (near.has(pv)) {
         // Right after a zoom, re-rendering waits a moment (the stretched bitmap and vector ink
@@ -567,7 +585,7 @@ export class Editor {
   // Renders thumbnails one at a time so PDF pages do not pile up in memory.
   showThumb(pv, el) {
     const t = this.thumbs.get(pv.page.id);
-    if (t && !t.stale) {
+    if (t?.url && !t.stale) {
       el.querySelector("img").src = t.url;
       return;
     }
@@ -605,7 +623,14 @@ export class Editor {
   updateIndicator() {
     if (!this.pageViews.length || !this.$(".sidebar")) return;
     const i = this.pageViews.indexOf(this.currentPage().pv);
-    this.$(".page-indicator").textContent = `${i + 1} / ${this.pageViews.length}`;
+    const ind = this.$(".page-indicator");
+    const text = `${i + 1} / ${this.pageViews.length}`;
+    if (ind.textContent !== text) {
+      ind.textContent = text;
+      ind.classList.remove("bump");
+      void ind.offsetWidth;
+      ind.classList.add("bump");
+    }
     if (i === this._activeIdx) return;
     this.$(".thumb-item.active")?.classList.remove("active");
     const el = this.$(`.thumb-item[data-idx="${i}"]`);
@@ -691,7 +716,19 @@ export class Editor {
     pv.el.classList.toggle("inverted", inverted);
     const key = `${W}x${H}`;
     if (pv.bgKey === key && pv.bg.width) return this.scheduleDetail();
-    const fresh = !pv.bg.width;
+    // First appearance: put a quick quarter-resolution render up immediately so the page is
+    // never shown blank while the full-resolution one is drawn.
+    if (!pv.bg.width) {
+      const quick = document.createElement("canvas");
+      quick.width = Math.max(1, Math.round(W / 4));
+      quick.height = Math.max(1, Math.round(H / 4));
+      const qjob = async () => token === pv.token && pv.rendered && (await drawBackground(quick, pv.page, isDark()), true);
+      const qran = await (this._bgQ = (this._bgQ || Promise.resolve()).then(qjob, qjob));
+      if (!qran || token !== pv.token || !pv.rendered) return;
+      quick.className = "bg";
+      pv.bg.replaceWith(quick);
+      pv.bg = quick;
+    }
     const off = document.createElement("canvas");
     off.width = W;
     off.height = H;
@@ -702,7 +739,7 @@ export class Editor {
       off.width = off.height = 0;
       return;
     }
-    off.className = "bg" + (fresh ? " fresh" : "");
+    off.className = "bg";
     const old = pv.bg;
     old.replaceWith(off);
     old.width = old.height = 0;
@@ -839,14 +876,41 @@ export class Editor {
 
   addPage(type) {
     const page = newPage(type);
-    this.doc.pages.push(page);
-    this.byPage.set(page.id, []);
-    const pv = this.makePageView(page);
-    this.pageViews.push(pv);
-    this.pagesEl.appendChild(pv.el);
+    const at = this.pageViews.length;
+    this.insertPages(at, [page]);
+    this.pushUndo({ type: "pages-add", at, pages: [page] });
+    this.scroller.scrollTo({ top: this.pageViews[at].el.offsetTop - 12, behavior: "smooth" });
+  }
+
+  // Inserts pages (with no ink) at index `at`; used by add page, PDF insert and redo.
+  insertPages(at, pages) {
+    this.doc.pages.splice(at, 0, ...pages);
+    const views = pages.map((p) => {
+      if (!this.byPage.has(p.id)) this.byPage.set(p.id, []);
+      const v = this.makePageView(p);
+      v.el.classList.add("page-new");
+      return v;
+    });
+    this.pageViews.splice(at, 0, ...views);
+    const ref = this.pageViews[at + views.length]?.el || null;
+    views.forEach((v) => this.pagesEl.insertBefore(v.el, ref));
     this.layout();
     this.buildSidebar();
-    this.scroller.scrollTo({ top: pv.el.offsetTop - 12, behavior: "smooth" });
+    this.dirty();
+    return views;
+  }
+
+  // Removes pages added by insertPages (undo). Their ink was undone first by the undo order.
+  removePages(pages) {
+    const ids = new Set(pages.map((p) => p.id));
+    for (const pv of this.pageViews.filter((v) => ids.has(v.page.id))) {
+      this.release(pv);
+      pv.el.remove();
+    }
+    this.pageViews = this.pageViews.filter((v) => !ids.has(v.page.id));
+    this.doc.pages = this.doc.pages.filter((p) => !ids.has(p.id));
+    this.layout();
+    this.buildSidebar();
     this.dirty();
   }
 
@@ -880,6 +944,13 @@ export class Editor {
     this.undoStack.push(op);
     if (this.undoStack.length > 200) this.undoStack.shift();
     this.redoStack = [];
+    this.updateUndoUI();
+  }
+
+  // Undo/redo buttons are dimmed when there is nothing to undo/redo.
+  updateUndoUI() {
+    this.$('[data-act="undo"]')?.toggleAttribute("disabled", !this.undoStack.length);
+    this.$('[data-act="redo"]')?.toggleAttribute("disabled", !this.redoStack.length);
   }
   applyOp(op, reverse) {
     switch (op.type) {
@@ -895,6 +966,10 @@ export class Editor {
           this.removeStrokes(op.removed);
           this.addStrokes(op.added);
         }
+        break;
+      case "pages-add":
+        if (reverse) this.removePages(op.pages);
+        else this.insertPages(op.at, op.pages);
         break;
       case "item-add":
       case "item-del":
@@ -912,12 +987,14 @@ export class Editor {
     if (!op) return;
     this.applyOp(op, true);
     this.redoStack.push(op);
+    this.updateUndoUI();
   }
   redo() {
     const op = this.redoStack.pop();
     if (!op) return;
     this.applyOp(op, false);
     this.undoStack.push(op);
+    this.updateUndoUI();
   }
 
   // ---------- attachments ----------
@@ -998,18 +1075,9 @@ export class Editor {
     const { pdfPages } = await import("./import.js");
     const pages = await pdfPages(file);
     const at = this.pageViews.indexOf(afterPv) + 1;
-    this.doc.pages.splice(at, 0, ...pages);
-    const views = pages.map((p) => {
-      this.byPage.set(p.id, []);
-      return this.makePageView(p);
-    });
-    this.pageViews.splice(at, 0, ...views);
-    const ref = this.pageViews[at + views.length]?.el || null;
-    views.forEach((v) => this.pagesEl.insertBefore(v.el, ref));
-    this.layout();
-    this.buildSidebar();
+    const views = this.insertPages(at, pages);
+    this.pushUndo({ type: "pages-add", at, pages });
     this.scroller.scrollTo({ top: views[0].el.offsetTop - 12, behavior: "smooth" });
-    this.dirty();
   }
 
   // Select tool: drag items to move, drag the corner handle to resize.
@@ -1161,7 +1229,7 @@ export class Editor {
         pinch = startPinch(e.touches);
         if (!pinch) return;
         this.pagesEl.style.transformOrigin = "0 0";
-        this.pagesEl.style.willChange = "transform";
+
       }
     }, { passive: true });
     sc.addEventListener("touchmove", (e) => {
@@ -1194,7 +1262,7 @@ export class Editor {
       sc.scrollLeft = t.sl;
       sc.scrollTop = t.st;
       this.pagesEl.style.transform = "";
-      this.pagesEl.style.willChange = "";
+
       this.updateVisible();
       this.scheduleDetail();
     };
