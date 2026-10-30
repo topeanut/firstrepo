@@ -15,6 +15,8 @@ const HL_COLORS = ["#ffe03d", "#7ce38b", "#7cc6ff", "#ff8fc7"];
 const PEN_SIZES = [1.6, 2.6, 4.2];
 const HL_SIZES = [12, 20, 30];
 const MAX_CANVAS_PX = 3e6; // whole-page PDF bitmap (detail layer adds sharpness when zoomed); iPad canvas memory is tight
+const PEN_REST = 1500; // ms without writing before background rendering resumes
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MAX_DETAIL_PX = 6e6; // sharp visible-region PDF bitmap used when zoomed in
 const SVGNS = "http://www.w3.org/2000/svg";
 const ERASER_SIZES = [5, 11, 22];
@@ -63,6 +65,7 @@ export class Editor {
     this.seq = 0;
     doc.strokes.forEach((s, i) => (this.seq = Math.max(this.seq, (s.seq ??= i))));
     this.changed = new Map(); // stroke id -> stroke (saved) or null (deleted) since the last save
+    this.lastPen = 0; // when the pen last touched or left the page (see isPenIdle)
     this.urls = new Map();
     this.selected = null;
     for (const s of doc.strokes) this.byPage.get(s.page)?.push(s);
@@ -614,8 +617,7 @@ export class Editor {
     if (t?.pending) return;
     this.thumbs.set(pv.page.id, { ...t, pending: true });
     this._thumbQ = (this._thumbQ || Promise.resolve()).then(async () => {
-      // Thumbnails are background work: wait for pen-up, exports and open/zoom animations.
-      while (this.active || this.exporting || this._hold) await new Promise((r) => setTimeout(r, 400));
+      await this.penIdle();
       try {
         const c = await this.thumbCanvas(pv.page);
         const url = c.toDataURL("image/jpeg", 0.7);
@@ -639,7 +641,11 @@ export class Editor {
       bg = document.createElement("canvas");
       bg.width = W;
       bg.height = H;
-      await drawBackground(bg, page);
+      // A PDF page already on screen is scaled down instead of rendered again: every pdf.js
+      // render of a scanned page costs a main-thread hitch.
+      const pv = this.pvOf(page.id);
+      if (page.bg.type === "pdf" && pv?.bgKey && pv.bg.width) bg.getContext("2d").drawImage(pv.bg, 0, 0, W, H);
+      else await drawBackground(bg, page);
       this.thumbBg.set(page.id, bg);
       if (this.thumbBg.size > 150) {
         const [oldId, old] = this.thumbBg.entries().next().value;
@@ -778,12 +784,14 @@ export class Editor {
     off.height = H;
     // One PDF render at a time (pdf.js paints on the main thread); skip work that went stale.
     const job = async () => {
+      // Pages not on screen yet wait until writing pauses (or until they scroll into view).
+      while (token === pv.token && pv.rendered && !this.isNear(pv, 0) && !this.isPenIdle()) await sleep(300);
       if (token !== pv.token || !pv.rendered) return false;
       if (!this.isNear(pv, this.scroller.clientHeight * 1.5)) {
         pv.needsRender = true; // scrolled away while queued; render when it comes back
         return false;
       }
-      await drawBackground(off, pv.page, isDark());
+      await drawBackground(off, pv.page, isDark(), true);
       return true;
     };
     const ran = await (this._bgQ = (this._bgQ || Promise.resolve()).then(job, job));
@@ -817,7 +825,7 @@ export class Editor {
   }
 
   updateDetail() {
-    if (this.active || this._hold || !this.scroller) return this.scheduleDetail();
+    if (!this.isPenIdle() || !this.scroller) return this.scheduleDetail();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const box = this.scroller.getBoundingClientRect();
     const visible = new Set(this.visiblePages(0));
@@ -1357,9 +1365,20 @@ export class Editor {
     return [((e.clientX - r.left) / r.width) * pv.page.w, ((e.clientY - r.top) / r.height) * pv.page.h];
   }
 
+  // Background work (thumbnails, pages off screen, sharp zoom detail) runs only while the pen
+  // rests: a scanned PDF page render blocks the main thread for a moment, and starting one in
+  // the short gap between two strokes froze the next stroke.
+  isPenIdle() {
+    return !this.active && !this.exporting && !this._hold && performance.now() - this.lastPen > PEN_REST;
+  }
+  async penIdle() {
+    while (!this.isPenIdle()) await sleep(300);
+  }
+
   onDown(e) {
     const pageEl = e.target.closest(".page");
     if (!pageEl || this.active) return;
+    this.lastPen = performance.now();
     const pv = pageEl._pv;
     if (this.tool === "select" && e.button === 0) {
       if (this.onItemDown(e, pv)) return;
@@ -1573,6 +1592,7 @@ export class Editor {
     const a = this.active;
     if (!a || a.id !== e.pointerId) return;
     this.active = null;
+    this.lastPen = performance.now();
     a.cursor?.remove();
     if (a.livePath && (cancelled || !a.stroke?.pts.length)) a.livePath.remove();
     const quickTap = !a.moved && performance.now() - a.t0 < 350;

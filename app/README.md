@@ -15,6 +15,7 @@ Penote is a handwriting note app for iPad and the web. It is a static web app (P
 - Dark mode: light by default; it can be set to dark or to follow the iPad appearance. Paper and ink adapt, and PDFs can optionally be darkened too. Exported PDFs always stay light.
 - Folders: create nested folders, give them colours, move notes by menu or by long-pressing a note and dropping it on a folder. Select several notes to move them or group them into a new folder. Search across all notes. The browser/back gesture walks back through folders and out of notes.
 - Works offline: everything is stored locally in IndexedDB
+- Large scanned PDFs (hundreds of pages): only the few pages on screen keep their decoded images in memory, and thumbnails and off-screen pages render only once writing has paused for 1.5s, so writing is never interrupted by PDF rendering.
 
 ## Install on iPad
 
