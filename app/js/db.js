@@ -1,6 +1,6 @@
-// IndexedDB storage: note list metadata, note documents, and binary blobs (PDFs, audio).
+// IndexedDB storage: note list metadata, note documents, folders, and binary blobs (PDFs, audio).
 const DB_NAME = "penote";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise;
 
@@ -8,11 +8,15 @@ function open() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = (e) => {
         const db = req.result;
-        db.createObjectStore("notes", { keyPath: "id" });
-        db.createObjectStore("docs", { keyPath: "id" });
-        db.createObjectStore("blobs");
+        if (e.oldVersion < 1) {
+          db.createObjectStore("notes", { keyPath: "id" });
+          db.createObjectStore("docs", { keyPath: "id" });
+          db.createObjectStore("blobs");
+        }
+        // v2: folders = { id, name, parent (folder id or null), created }
+        if (e.oldVersion < 2) db.createObjectStore("folders", { keyPath: "id" });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -44,6 +48,18 @@ export const putDoc = (doc) => tx("docs", "readwrite", (s) => s.put(doc));
 export const getBlob = (key) => tx("blobs", "readonly", (s) => s.get(key));
 export const putBlob = (key, blob) => tx("blobs", "readwrite", (s) => s.put(blob, key));
 export const deleteBlob = (key) => tx("blobs", "readwrite", (s) => s.delete(key));
+
+export const listFolders = async () =>
+  (await tx("folders", "readonly", (s) => s.getAll())).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+export const putFolder = (f) => tx("folders", "readwrite", (s) => s.put(f));
+export const deleteFolderRecord = (id) => tx("folders", "readwrite", (s) => s.delete(id));
+
+// Moves a note into a folder (null = top level); the folder lives on both the doc and its metadata.
+export async function moveNote(id, folder) {
+  const [doc, note] = await Promise.all([getDoc(id), getNote(id)]);
+  if (doc) await putDoc({ ...doc, folder });
+  if (note) await putNote({ ...note, folder });
+}
 
 export async function deleteNote(id) {
   const doc = await getDoc(id);
