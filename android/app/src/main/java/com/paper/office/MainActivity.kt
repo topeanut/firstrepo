@@ -26,6 +26,7 @@ import com.paper.office.doc.DocRef
 import com.paper.office.doc.DocTypes
 import com.paper.office.doc.PdfEditModel
 import com.paper.office.doc.PdfExporter
+import com.paper.office.doc.PdfVectorExporter
 import com.paper.office.doc.TextIO
 import com.paper.office.ui.PaperApp
 import com.paper.office.ui.theme.PaperTheme
@@ -244,9 +245,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val src = current?.uri ?: return
         val model = pdfEdit ?: return
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { PdfExporter.export(getApplication(), src, model, uri) }
-            if (ok) model.dirty = false
-            toastMessage = if (ok) "PDF 저장 완료" else "저장 중 오류가 발생했어요"
+            // 벡터 보존 저장을 먼저 시도하고, 실패하면 래스터 방식으로 대체
+            val result = withContext(Dispatchers.IO) {
+                if (PdfVectorExporter.export(getApplication(), src, model, uri)) "vector"
+                else if (PdfExporter.export(getApplication(), src, model, uri)) "raster"
+                else null
+            }
+            if (result != null) model.dirty = false
+            toastMessage = when (result) {
+                "vector" -> "PDF 저장 완료"
+                "raster" -> "PDF 저장 완료(래스터)"
+                else -> "저장 중 오류가 발생했어요"
+            }
         }
     }
 

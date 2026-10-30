@@ -12,8 +12,8 @@ android {
         applicationId = "com.paper.office"
         minSdk = 24
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.9.0"
+        versionCode = 10
+        versionName = "0.10.0"
     }
 
     signingConfigs {
@@ -64,4 +64,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    // 벡터 보존 PDF 저장(원본 텍스트/벡터 유지)
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }

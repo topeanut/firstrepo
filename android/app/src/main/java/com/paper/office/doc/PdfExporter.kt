@@ -47,8 +47,7 @@ object PdfExporter {
 
                 // 2) 주석 레이어(투명) — 지우개는 여기서만 작동
                 if (pe.strokes.isNotEmpty()) {
-                    val annBmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
-                    drawStrokes(Canvas(annBmp), pe.strokes, bw.toFloat(), bh.toFloat())
+                    val annBmp = annotationBitmap(pe.strokes, bw, bh)
                     Canvas(pageBmp).drawBitmap(annBmp, 0f, 0f, null)
                     annBmp.recycle()
                 }
@@ -83,6 +82,13 @@ object PdfExporter {
             try { renderer?.close() } catch (_: Exception) {}
             try { pfd?.close() } catch (_: Exception) {}
         }
+    }
+
+    /** 투명 배경에 주석을 그린 비트맵(지우개는 이 레이어 안에서만 작동). */
+    fun annotationBitmap(strokes: List<PdfStroke>, bw: Int, bh: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+        drawStrokes(Canvas(bmp), strokes, bw.toFloat(), bh.toFloat())
+        return bmp
     }
 
     private fun drawStrokes(canvas: Canvas, strokes: List<PdfStroke>, w: Float, h: Float) {
