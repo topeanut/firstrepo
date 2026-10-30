@@ -4,6 +4,7 @@ import { newDoc, newPage, noteMeta } from "./model.js";
 import { makeThumb } from "./render.js";
 import { Editor } from "./editor.js";
 import { icon } from "./icons.js";
+import { cycleTheme, getTheme, THEME_LABEL } from "./theme.js";
 
 const root = document.getElementById("app");
 let editor = null;
@@ -11,6 +12,8 @@ let editor = null;
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmtDate = (t) =>
   new Date(t).toLocaleDateString("ko-KR", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+const themeIcon = () => ({ system: "auto", light: "sun", dark: "moon" })[getTheme()];
 
 async function showLibrary() {
   editor = null;
@@ -20,6 +23,7 @@ async function showLibrary() {
     <header class="lib-head">
       <h1>Penote</h1>
       <div class="lib-actions">
+        <button class="btn" data-act="theme" title="테마">${icon(themeIcon())}<span>${THEME_LABEL[getTheme()]}</span></button>
         <button class="btn" data-act="import">${icon("import")}<span>가져오기</span></button>
         <button class="btn primary" data-act="new">${icon("plus")}<span>새 노트</span></button>
       </div>
@@ -76,6 +80,10 @@ async function onLibraryClick(e) {
       openNote(doc.id);
       break;
     }
+    case "theme":
+      cycleTheme();
+      b.innerHTML = `${icon(themeIcon())}<span>${THEME_LABEL[getTheme()]}</span>`;
+      break;
     case "import":
       root.querySelector(".file").click();
       break;
