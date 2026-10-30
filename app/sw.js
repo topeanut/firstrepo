@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever app files change.
-const VERSION = "penote-v14";
+const VERSION = "penote-v15";
 const ASSETS = [
   "./",
   "index.html",

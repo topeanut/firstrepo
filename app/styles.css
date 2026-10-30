@@ -516,6 +516,8 @@ body, .toolbar, .lib-side, .lib-head, .sidebar, .scroller { transition: backgrou
 .page canvas.detail { right: auto; bottom: auto; border-radius: 0; }
 .page.inverted canvas { filter: invert(0.92) hue-rotate(180deg); }
 .page:not(.paper-pdf) canvas.bg { display: none; }
+/* Until a PDF page is drawn, its thumbnail (inline background-image) stands in for it. */
+.page.paper-pdf { background-size: 100% 100%; background-repeat: no-repeat; }
 /* Paper is drawn by CSS: always crisp, no bitmap to re-render when zooming. */
 .page { --paper: #fff; --rule: #cfe0f1; --grid: #e3e8ee; background-color: var(--paper); }
 .page.dark { --paper: #202124; --rule: #2f3b4a; --grid: #33363b; }
